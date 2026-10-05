@@ -23,7 +23,10 @@ def main() -> int:
     with open(os.environ["FAKE_RECORD"], "w", encoding="utf-8") as handle:
         json.dump(record, handle)
 
-    scenario = os.environ.get("FAKE_SCENARIO", "ok")
+    scenario = os.environ.get("FAKE_CODEX_SCENARIO") or os.environ.get("FAKE_SCENARIO", "ok")
+    if scenario == "done":
+        REVIEW.update(status="done", next_prompt=None)
+        scenario = "ok"
     sys.stderr.write("Reading additional input from stdin...\n")
     lines: list[dict] = [{"type": "thread.started", "thread_id": "thread-1"}, {"type": "turn.started"}]
     code = 0

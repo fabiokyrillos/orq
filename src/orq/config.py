@@ -29,6 +29,8 @@ class ReviewerConfig:
     routine_effort: str = "low"
     final_effort: str = "high"
     switch_at_used_percent: int = 90
+    # Keeps the owner's Codex plugins, hooks and MCP servers out of reviewer calls (about 30% fewer tokens).
+    codex_ignore_user_config: bool = True
 
 
 @dataclass

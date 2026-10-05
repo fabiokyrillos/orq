@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+
+from orq.adapters.base import split_command
 
 GhRunner = Callable[[list[str], Path], str]
 
@@ -14,9 +17,15 @@ class GitError(RuntimeError):
     pass
 
 
+def gh_argv() -> list[str]:
+    override = os.environ.get("ORQ_GH_CMD")
+    if override:
+        return split_command(override)
+    return [shutil.which("gh") or "gh"]
+
+
 def _run_gh(args: list[str], cwd: Path) -> str:
-    gh = shutil.which("gh") or "gh"
-    proc = subprocess.run([gh, *args], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8")
+    proc = subprocess.run([*gh_argv(), *args], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8")
     if proc.returncode != 0:
         raise GitError(f"gh {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
     return proc.stdout

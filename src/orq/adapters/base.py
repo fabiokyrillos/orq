@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,11 @@ class Agent(Protocol):
         run_dir: Path | None = None,
         on_event: EventCallback | None = None,
     ) -> AgentResult: ...
+
+
+def split_command(value: str) -> list[str]:
+    """Split an ORQ_*_CMD override into argv; quote tokens that contain spaces."""
+    return [token.strip('"') for token in shlex.split(value, posix=False)]
 
 
 def clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:

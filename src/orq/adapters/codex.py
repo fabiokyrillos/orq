@@ -7,7 +7,7 @@ import os
 import shutil
 from pathlib import Path
 
-from orq.adapters.base import AgentResult, EventCallback, clean_env, stream_process
+from orq.adapters.base import AgentResult, EventCallback, clean_env, split_command, stream_process
 from orq.adapters.schema import REVIEW_SCHEMA, validate_review
 
 
@@ -15,7 +15,7 @@ def codex_argv() -> list[str]:
     """Resolve node + codex.js behind the npm shim; ORQ_CODEX_CMD (space separated) overrides."""
     override = os.environ.get("ORQ_CODEX_CMD")
     if override:
-        return override.split()
+        return split_command(override)
     shim = shutil.which("codex")
     if shim is None:
         raise FileNotFoundError("codex is not on PATH")

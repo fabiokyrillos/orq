@@ -9,7 +9,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from orq.adapters.base import AgentResult, Completed, EventCallback, clean_env, stream_process
+from orq.adapters.base import AgentResult, Completed, EventCallback, clean_env, split_command, stream_process
 from orq.adapters.schema import REVIEW_SCHEMA, validate_review
 
 # Owner's global plugins, hooks and MCP servers stay out; --settings hooks still load (Phase 0).
@@ -24,7 +24,7 @@ def claude_argv() -> list[str]:
     """Resolve claude.exe behind the npm shim; ORQ_CLAUDE_EXE overrides."""
     override = os.environ.get("ORQ_CLAUDE_EXE")
     if override:
-        return [override]
+        return split_command(override)
     shim = shutil.which("claude")
     if shim is None:
         raise FileNotFoundError("claude is not on PATH")

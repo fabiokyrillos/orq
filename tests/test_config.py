@@ -19,6 +19,7 @@ def test_defaults_when_file_is_missing(tmp_path: Path) -> None:
     assert config.reviewer.routine_effort == "low"
     assert config.reviewer.final_effort == "high"
     assert config.reviewer.switch_at_used_percent == 90
+    assert config.reviewer.codex_ignore_user_config is True
     assert config.git.merge_strategy == "squash"
     assert config.git.worktree_root == Path("C:/orq-wt")
     assert config.git.protected_paths == [".github/**", "migrations/**", "**/.env*"]
