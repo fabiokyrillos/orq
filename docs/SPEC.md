@@ -291,6 +291,7 @@ Confirmed in Phase 0:
 * `gh pr merge` does not wait for checks; it merged a PR whose CI was still queued. Step 1 is orq's job and must complete before the merge call.
 * `gh pr checks <n> --json name,state,bucket` exits 1 with `no checks reported` for about a minute after PR creation; treat that as pending. Free runners can sit in `QUEUED` for many minutes, so the CI wait has a long timeout (default 60 min) and polls every 20 to 30 s.
 * Merging from inside the worktree works. `--delete-branch` removes the remote branch and skips the local delete with a warning (exit 0); orq removes the worktree and local branch itself.
+* A run can fail without ever running: after 15 minutes GitHub cancels a job no hosted runner picked up (`conclusion: failure`, job `cancelled`, no steps, annotation `The job was not acquired by Runner of type hosted even after multiple attempts`). The verifier treats that as an infrastructure failure and re-runs it (`gh run rerun <id>`, default 3 attempts) instead of starting a new implementer iteration.
 
 ## 11. Storage and logs
 

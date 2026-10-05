@@ -306,4 +306,4 @@ Git is fine with the per-repo setting. Everything else breaks past 260 character
 1. **`LongPathsEnabled`** (owner decision): enable it, or rely on a short `worktree_root`.
 2. **`codex --ignore-user-config`**: untested here; try it first in Phase 1 to cut the 86k-token baseline.
 3. **Codex usage-limit error text**: capture from the first real occurrence.
-4. **Sandbox CI runs** were still queued at the end of Phase 0; confirm the workflow goes green before relying on it in Phase 1.
+4. ~~Sandbox CI runs still queued~~ Resolved: the `pull_request` run passed (`ci #2`, 10m40s, almost all of it queue time). Both `push` runs to `main` ended as `conclusion: failure` after exactly 15 minutes with the job `cancelled`, zero steps, empty `runner_name`, and the annotation `The job was not acquired by Runner of type hosted even after multiple attempts`. That is GitHub runner capacity, not the workflow. orq's merge gate must tell this apart from a real check failure: a run whose jobs have no steps and carry that annotation is an infrastructure failure and gets `gh run rerun <id>` (bounded retries), not a new implementer iteration.
