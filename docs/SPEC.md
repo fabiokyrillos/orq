@@ -3,7 +3,7 @@
 **Spec version:** 1.0
 **Date:** 2026-10-05
 **Owner:** Binho (Fábio Kyrillos)
-**Status:** Planning closed. Ready for Phase 0.
+**Status:** Phase 0 complete (see `docs/phase0-findings.md`). Ready for Phase 1.
 
 ---
 
@@ -40,6 +40,17 @@ Automate the loop the owner runs by hand today:
 | Messaging | Evolution API + n8n, both on a VPS |
 | Live view | Required |
 
+**CLI invocation rules (Phase 0 findings):**
+
+* `claude` and `codex` on PATH are npm `.cmd` shims. Adapters resolve and launch the real targets (`claude.exe`; `node codex.js`) with an argument list, never through a shell.
+* Prompts go in on stdin. stdin is always closed or fed; `codex exec` waits on an open stdin.
+* Adapters strip every `CLAUDE*` and `ANTHROPIC*` variable from the child environment, so orq behaves the same when started from inside a Claude session.
+* The standalone `claude` CLI has its own login, separate from the desktop app. `claude auth status` must report `loggedIn: true` before a run starts.
+* The Codex model is always passed explicitly (`-m`). `~/.codex/config.toml` is shared with the desktop app and may name a model the CLI cannot use on a ChatGPT plan.
+* Every `claude -p` call uses `--setting-sources project,local --strict-mcp-config`, which keeps the owner's global plugins, hooks and MCP servers out of orq runs (146 tools and 58k context tokens down to 32 tools and 9k) while `--settings` hooks still load. `--safe-mode` and `--bare` are never used: the first disables orq's own guard hook, the second disables OAuth.
+* A Claude session can only be resumed from the directory it was created in, so every call for a run uses the worktree as cwd. `--append-system-prompt` is not stored in the session and is passed on every call.
+* The implementer runs with `--dangerously-skip-permissions`; the guard hook (section 10.3) is the control. A failed call reports `is_error: true` and exit code 1 while `subtype` still says `success`.
+
 **Implementation stack (proposed):** Python 3.12+, `uv`, `typer` (CLI), `sqlite3` (queue and status), `asyncio` subprocesses, `httpx` (n8n calls), `FastAPI` + Server Sent Events (dashboard, Phase 4), `pytest`.
 
 ## 4. Roles
@@ -47,7 +58,7 @@ Automate the loop the owner runs by hand today:
 | Role | Default | Fallback | Permissions |
 |---|---|---|---|
 | Implementer | `claude` (Opus for hard steps, Sonnet for mechanical ones) | none | Full edit and exec inside the worktree, guarded by hooks |
-| Reviewer | `codex exec` | `claude -p` with Opus, read only tools | Read only |
+| Reviewer | `codex exec --sandbox read-only` (on `exec resume`: `-c sandbox_mode="read-only"`, there is no `--sandbox` flag) | `claude -p --model opus --tools "Read,Grep,Glob" --json-schema <schema>` | Read only |
 | Planner | Same agent as Reviewer, high reasoning effort | Same fallback | Read only |
 
 The reviewer adapter must be swappable at runtime: when Codex hits its usage limit, switch to the Claude reviewer and switch back after the limit resets. All adapters share one interface.
@@ -120,7 +131,7 @@ Every transition is written to `events.jsonl` and to SQLite before it takes effe
 required | skip
 ```
 
-### 8.2 Reviewer output (enforced with `--output-schema` on Codex, prompt plus validation on the Claude fallback)
+### 8.2 Reviewer output (enforced with `--output-schema` on Codex and `--json-schema` on the Claude fallback, which returns it in `result.structured_output`)
 
 ```json
 {
@@ -140,7 +151,9 @@ required | skip
 }
 ```
 
-`human` is null unless `status` is `needs_human`. Codex strict schemas may require every field to be present and nullable; confirm in Phase 0.
+`human` is null unless `status` is `needs_human`.
+
+Confirmed in Phase 0: Codex rejects a schema unless every object sets `additionalProperties: false` and lists every property in `required`. Optional values are therefore nullable, not omitted: `next_prompt` is `["string","null"]` and `human` is `["object","null"]`. Codex forces every agent message, including intermediate progress notes, into this shape, so the adapter reads only the final message (`-o <file>`).
 
 Reviewer standing rules (in its prompt):
 
@@ -230,7 +243,15 @@ Pause and ask the owner when any of these fire:
 
 ### 10.3 Guard: pre execution (`PreToolUse` hook, Python)
 
-Denies and records: `git push --force`, `git reset --hard`, branch deletion, recursive deletes, `DROP`/`TRUNCATE`, dependency removal, writes outside the worktree. orq turns the denial into a destructive decision. On `APPROVE`, orq writes a one time allow token for that exact action into the run dir; the hook consumes it on retry. How the hook is attached (`--settings` file vs generated local settings in the worktree) is a Phase 0 item.
+Denies and records: `git push --force`, `git reset --hard`, branch deletion, recursive deletes, `DROP`/`TRUNCATE`, dependency removal, writes outside the worktree. orq turns the denial into a destructive decision. On `APPROVE`, orq writes a one time allow token for that exact action into the run dir; the hook consumes it on retry.
+
+Confirmed in Phase 0:
+
+* The hook is attached with `--settings <file>` kept in the run dir, never inside the worktree. It fires under `--dangerously-skip-permissions` and overrides `--allowedTools`.
+* Deny format: exit 0 with `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "..."}}` on stdout. The reason reaches the model verbatim. (Exit code 2 also works but prefixes the reason with the hook command line.)
+* The hook command is `"<absolute python.exe>" "<absolute guard.py>"` with forward slashes; it runs through Git Bash. orq passes `ORQ_RUN_DIR` in the environment so the hook finds the token directory and its log.
+* Every denial also appears in `result.permission_denials` with the full `tool_input`.
+* `.claude/**` in the worktree is a protected path: `--setting-sources project,local` still loads the repo's own settings and hooks.
 
 ### 10.4 Guard: post execution (diff rules)
 
@@ -239,11 +260,16 @@ Deleted files, removed tests, removed exported functions or routes, protected pa
 ### 10.5 Secrets (repos are public)
 
 * `gitleaks` scan before every commit and every push. A hit blocks and raises a `risk` decision.
+  * Before commit: `gitleaks git --pre-commit --staged --redact --no-banner --report-format json --report-path <file> <worktree>`.
+  * Before push: `gitleaks git --log-opts=origin/<base>..HEAD --redact --no-banner <worktree>`.
+  * Exit code 1 means leaks found, 0 means clean.
 * Standard `.gitignore` applied at repo creation (`.env`, credentials, data dumps).
 
 ### 10.6 Git strategy
 
-* One worktree per run, outside the repo: `%USERPROFILE%\.orq\worktrees\<repo>\<run_id>`. Enable `core.longpaths`.
+* One worktree per run, outside the repo: `<worktree_root>\<repo>\<run_id>`, default root `%USERPROFILE%\.orq\worktrees`. Set `core.longpaths=true` in the repo config; without it, checkout fails past 260 characters.
+* Worktree config also sets `core.autocrlf=false`; the owner's global `autocrlf=true` would otherwise rewrite line endings in public repos.
+* `core.longpaths` only fixes git. Python, PowerShell 5.1 (which Codex uses to read files) and other tools still fail past 260 characters unless Windows `LongPathsEnabled=1`. Prerequisite: the owner enables it, or sets a short `worktree_root` such as `C:\orq-wt`.
 * Branch `orq/<task-slug>`.
 * One commit per iteration: `orq(<run_id>) iter <n>: <summary>`.
 * `orq rollback <run_id> --to <n>` resets the worktree to that commit and tells the reviewer what was discarded.
@@ -259,6 +285,12 @@ All must hold:
 5. Branch up to date with base. If base moved, rebase, re run CI, re run step 2.
 
 Then `gh pr merge --squash --delete-branch`, remove the worktree, mark `DONE`. Squash is the default, configurable.
+
+Confirmed in Phase 0:
+
+* `gh pr merge` does not wait for checks; it merged a PR whose CI was still queued. Step 1 is orq's job and must complete before the merge call.
+* `gh pr checks <n> --json name,state,bucket` exits 1 with `no checks reported` for about a minute after PR creation; treat that as pending. Free runners can sit in `QUEUED` for many minutes, so the CI wait has a long timeout (default 60 min) and polls every 20 to 30 s.
+* Merging from inside the worktree works. `--delete-branch` removes the remote branch and skips the local delete with a warning (exit 0); orq removes the worktree and local branch itself.
 
 ## 11. Storage and logs
 
@@ -286,7 +318,10 @@ Never inside the repo (repos are public):
 
 ## 12. Rate limits and model routing
 
-* Detect usage limit errors from both CLIs (exact messages captured in Phase 0) and distinguish them from real failures.
+* Detect usage limit errors from both CLIs and distinguish them from real failures.
+  * Claude (real occurrences): message `You've hit your session limit · resets 10pm (America/Cayenne)` with `error: "rate_limit"`. The reset is a local clock time plus zone, with no date. A failed `claude -p` call reports `is_error: true` and exit code 1 while `subtype` still says `success`, so adapters test `is_error`. Every `stream-json` run also emits a `rate_limit_event` (`rate_limit_info.status`, `resetsAt`, `rateLimitType`) before `result`; the adapter records it for proactive backoff.
+  * Codex: failures arrive as an `error` event followed by `turn.failed` and exit code 1. The session file (`~/.codex/sessions/.../rollout-*-<thread_id>.jsonl`) carries a `rate_limits` snapshot on every `token_count` event (`primary.used_percent`, `primary.resets_at`, `secondary.*`). The adapter reads it after each call and switches to the fallback before the limit is reached (default 90 percent), then back after `resets_at`.
+  * An unrecognized error is never retried blindly; it pauses the run for the owner.
 * Codex limit → switch reviewer to the Claude fallback, record it, retry Codex after reset.
 * Claude limit → `PAUSED_RATE_LIMIT`, backoff, notify owner.
 * Keep reviewer prompts lean: the reviewer reads the repo; send only task, milestone, diff summary, check results, implementer final message.
@@ -307,12 +342,15 @@ mechanical_model = "sonnet"
 
 [reviewer]
 primary = "codex"
+codex_model = "gpt-5.5"
 fallback = "claude"
+switch_at_used_percent = 90
 routine_effort = "low"
 final_effort = "high"
 
 [git]
 merge_strategy = "squash"
+worktree_root = "~/.orq/worktrees"
 protected_paths = [".github/**", "migrations/**", "**/.env*"]
 
 [notify]
