@@ -1,0 +1,77 @@
+"""Global configuration (SPEC section 13). Secrets never live here; they come from env vars."""
+
+from __future__ import annotations
+
+import tomllib
+from dataclasses import dataclass, field, fields, is_dataclass
+from pathlib import Path
+from typing import Any
+
+
+@dataclass
+class LimitsConfig:
+    max_iterations: int = 15
+    max_wall_hours: float = 6
+    max_concurrent_runs: int = 2
+
+
+@dataclass
+class ImplementerConfig:
+    default_model: str = "opus"
+    mechanical_model: str = "sonnet"
+
+
+@dataclass
+class ReviewerConfig:
+    primary: str = "codex"
+    codex_model: str = "gpt-5.5"
+    fallback: str = "claude"
+    routine_effort: str = "low"
+    final_effort: str = "high"
+    switch_at_used_percent: int = 90
+
+
+@dataclass
+class GitConfig:
+    merge_strategy: str = "squash"
+    # Short root: Windows LongPathsEnabled is often off and non-git tools fail past 260 chars.
+    worktree_root: Path = Path("C:/orq-wt")
+    protected_paths: list[str] = field(default_factory=lambda: [".github/**", "migrations/**", "**/.env*"])
+    # Until the guard (Phase 2) exists, runs are only allowed against these repos.
+    sandbox_repos: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.worktree_root = Path(str(self.worktree_root)).expanduser()
+
+
+@dataclass
+class Config:
+    limits: LimitsConfig = field(default_factory=LimitsConfig)
+    implementer: ImplementerConfig = field(default_factory=ImplementerConfig)
+    reviewer: ReviewerConfig = field(default_factory=ReviewerConfig)
+    git: GitConfig = field(default_factory=GitConfig)
+
+
+def load_config(path: Path) -> Config:
+    """Load config.toml; missing file means all defaults. Unknown keys are an error."""
+    if not path.exists():
+        return Config()
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    return _build(Config, raw, prefix="")
+
+
+def _build(cls: type, raw: dict[str, Any], prefix: str) -> Any:
+    known = {f.name: f for f in fields(cls)}
+    for key in raw:
+        if key not in known:
+            raise ValueError(f"unknown config key: {prefix}{key}")
+    kwargs: dict[str, Any] = {}
+    for name, value in raw.items():
+        target = known[name].type
+        if isinstance(value, dict) and isinstance(target, str) and target.endswith("Config"):
+            kwargs[name] = _build(globals()[target], value, prefix=f"{prefix}{name}.")
+        elif is_dataclass(target) and isinstance(value, dict):
+            kwargs[name] = _build(target, value, prefix=f"{prefix}{name}.")
+        else:
+            kwargs[name] = value
+    return cls(**kwargs)
