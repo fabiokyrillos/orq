@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 
 from orq.adapters.base import AgentResult, EventCallback, clean_env, split_command, stream_process
-from orq.adapters.schema import REVIEW_SCHEMA, validate_review
+from orq.adapters.schema import REVIEW_CONTRACT, OutputContract
 
 _LIMIT_RE = re.compile(r"usage limit|rate limit|quota|too many requests|\b429\b", re.IGNORECASE)
 _AUTH_RE = re.compile(r"unauthori[sz]ed|not logged in|codex login|\b401\b", re.IGNORECASE)
@@ -82,16 +82,18 @@ class CodexReviewer:
         self.last_rate_limits: dict | None = None
 
     async def run(self, prompt: str, *, cwd: Path, log_path: Path, session_id: str | None = None,
-                  run_dir: Path | None = None, on_event: EventCallback | None = None) -> AgentResult:
-        schema_path = log_path.parent / "reviewer.schema.json"
-        schema_path.write_text(json.dumps(REVIEW_SCHEMA, indent=2), encoding="utf-8")
-        last_path = log_path.parent / "reviewer.last.json"
+                  run_dir: Path | None = None, on_event: EventCallback | None = None, model: str | None = None,
+                  effort: str | None = None, contract: OutputContract | None = None) -> AgentResult:
+        contract = contract or REVIEW_CONTRACT
+        schema_path = log_path.parent / f"{contract.name}.schema.json"
+        schema_path.write_text(json.dumps(contract.schema, indent=2), encoding="utf-8")
+        last_path = log_path.parent / f"{contract.name}.last.json"
         last_path.unlink(missing_ok=True)
 
         # The model is explicit: config.toml may name one the CLI cannot use (Phase 0 finding).
-        argv = [*(self._prefix or codex_argv()), "-m", self.model, "exec", "--json", "--sandbox", "read-only",
+        argv = [*(self._prefix or codex_argv()), "-m", model or self.model, "exec", "--json", "--sandbox", "read-only",
                 "-C", str(cwd), "--output-schema", str(schema_path), "-o", str(last_path),
-                "-c", f'model_reasoning_effort="{self.effort}"']
+                "-c", f'model_reasoning_effort="{effort or self.effort}"']
         if self.ignore_user_config:
             # Keeps the owner's plugins, hooks and MCP servers out; the Windows sandbox setting must then be restated.
             argv += ["--ignore-user-config", "-c", 'windows.sandbox="elevated"']
@@ -116,7 +118,7 @@ class CodexReviewer:
             structured = json.loads(text)
         except json.JSONDecodeError:
             structured = None
-        problems = validate_review(structured)
+        problems = contract.validate(structured)
         if problems:
             return AgentResult(ok=False, text=text, session_id=thread_id, error="; ".join(problems),
                                error_kind="invalid_output", usage=usage, rate_limit=self.last_rate_limits, exit_code=completed.exit_code)

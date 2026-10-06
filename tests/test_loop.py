@@ -40,7 +40,7 @@ class FakeImplementer:
     prompts: list[str] = field(default_factory=list)
     calls: int = 0
 
-    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         self.prompts.append(prompt)
         self.calls += 1
         (cwd / f"greeting{self.calls}.txt").write_text("hello\n", encoding="utf-8")
@@ -57,7 +57,7 @@ class FakeReviewer:
     name: str = "fake-reviewer"
     prompts: list[str] = field(default_factory=list)
 
-    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         self.prompts.append(prompt)
         log_path.write_text("{}\n", encoding="utf-8")
         return self.outputs.pop(0)
@@ -268,13 +268,13 @@ def denied(command: str, text: str = "I need to run that command.") -> AgentResu
 class NoWriteImplementer(FakeImplementer):
     """Like FakeImplementer, but the first call changes nothing (it only asked for a destructive action)."""
 
-    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         if self.calls == 0:
             self.prompts.append(prompt)
             self.calls += 1
             log_path.write_text("{}\n", encoding="utf-8")
             return self.results.pop(0)
-        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event)
+        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event, **kwargs)
 
 
 def test_guard_denial_becomes_destructive_decision_and_approve_writes_token(env) -> None:
@@ -346,10 +346,10 @@ def test_denial_without_other_work_skips_review(env) -> None:
 class DeletingImplementer(FakeImplementer):
     """First call deletes README.md (a deleted_file violation); later calls behave like FakeImplementer."""
 
-    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         if self.calls == 0:
             (cwd / "README.md").unlink()
-        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event)
+        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event, **kwargs)
 
 
 def test_diff_rule_violation_denied_resets_worktree(env) -> None:
@@ -390,7 +390,7 @@ def test_diff_rule_violation_approved_commits(env) -> None:
 class SameDiffImplementer(FakeImplementer):
     """Creates same.txt once, then rewrites identical content: iterations 2 and 3 produce empty diffs."""
 
-    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         self.prompts.append(prompt)
         self.calls += 1
         (cwd / "same.txt").write_text("same\n", encoding="utf-8")

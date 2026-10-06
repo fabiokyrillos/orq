@@ -324,3 +324,69 @@ def test_classify_codex_error() -> None:
     assert classify_codex_error("Not logged in. Run codex login", None) == "auth"
     assert classify_codex_error("Invalid schema", None) == "error"
     assert classify_codex_error("Invalid schema", {"rate_limit_reached_type": "primary"}) == "rate_limit"
+
+
+# Phase 3: plan contract, per-call model and effort
+
+
+def test_validate_plan_accepts_and_rejects() -> None:
+    from orq.adapters.schema import PLAN_SCHEMA, validate_plan
+    good = {"status": "plan", "summary": "s", "human": None,
+            "milestones": [{"title": "t", "goal": "g", "done_when": "d", "difficulty": "hard"}]}
+    assert validate_plan(good) == []
+    assert any("milestone" in p for p in validate_plan({**good, "milestones": []}))
+    assert any("difficulty" in p for p in validate_plan({**good, "milestones": [{"title": "t", "goal": "g", "done_when": "d", "difficulty": "easy"}]}))
+    assert any("human" in p for p in validate_plan({**good, "status": "needs_human", "milestones": []}))
+    assert validate_plan({"status": "needs_human", "summary": "s", "milestones": [],
+                          "human": {"decision_type": "ambiguity", "question": "q", "options": ["a"], "recommendation": 0}}) == []
+    assert validate_plan("nope") == ["output is not a JSON object"]
+
+    def strict(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "object" or node.get("type") == ["object", "null"]:
+                assert node.get("additionalProperties") is False and set(node["properties"]) == set(node["required"])
+            for value in node.values():
+                strict(value)
+        elif isinstance(node, list):
+            for value in node:
+                strict(value)
+
+    strict(PLAN_SCHEMA)
+
+
+def test_implementer_model_override_per_call(record, tmp_path, monkeypatch) -> None:
+    scenario(monkeypatch, "ok")
+    run(implementer(), "hi", tmp_path, model="sonnet")
+    argv = record()["argv"]
+    assert argv[argv.index("--model") + 1] == "sonnet"
+
+
+def test_codex_effort_and_plan_contract_per_call(record, tmp_path, monkeypatch) -> None:
+    from orq.adapters.schema import PLAN_CONTRACT, PLAN_SCHEMA
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "plan")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+    result = run(codex(), "plan it", tmp_path, effort="high", contract=PLAN_CONTRACT)
+
+    argv = record()["argv"]
+    assert 'model_reasoning_effort="high"' in argv
+    assert json.loads(Path(argv[argv.index("--output-schema") + 1]).read_text(encoding="utf-8")) == PLAN_SCHEMA
+    assert result.ok and result.structured["milestones"][1]["difficulty"] == "mechanical"
+
+
+def test_codex_review_contract_rejects_a_plan_shaped_answer(record, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "plan")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    result = run(codex(), "review it", tmp_path)
+    assert not result.ok and result.error_kind == "invalid_output"
+
+
+def test_claude_reviewer_plan_contract(record, tmp_path, monkeypatch) -> None:
+    from orq.adapters.schema import PLAN_CONTRACT, PLAN_SCHEMA
+    scenario(monkeypatch, "structured")
+    reviewer = ClaudeReviewer(model="opus", argv_prefix=[sys.executable, str(FAKES / "fake_claude.py")])
+    result = run(reviewer, "plan it", tmp_path, contract=PLAN_CONTRACT, model="sonnet")
+    argv = record()["argv"]
+    assert json.loads(argv[argv.index("--json-schema") + 1]) == PLAN_SCHEMA
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert not result.ok and result.error_kind == "invalid_output"  # the fake answers a review, not a plan

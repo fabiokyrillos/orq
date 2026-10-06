@@ -15,7 +15,7 @@ class Scripted:
     calls: int = 0
     sessions: list = field(default_factory=list)
 
-    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         self.calls += 1
         self.sessions.append(session_id)
         return self.results.pop(0)
@@ -90,3 +90,23 @@ def test_other_primary_errors_are_not_rerouted(tmp_path: Path) -> None:
     router = ReviewerRouter(primary, fallback, switch_at_used_percent=90, clock=lambda: 1000.0)
     result = run(router, tmp_path)
     assert not result.ok and fallback.calls == 0 and router.fallback_until is None
+
+
+def test_router_forwards_effort_and_contract(tmp_path: Path) -> None:
+    seen: list[dict] = []
+
+    @dataclass
+    class Recording:
+        name: str
+        result: AgentResult
+
+        async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, model=None, effort=None, contract=None):
+            seen.append({"name": self.name, "effort": effort, "contract": contract, "session": session_id})
+            return self.result
+
+    primary = Recording("codex", AgentResult(ok=False, error="usage limit", error_kind="rate_limit"))
+    fallback = Recording("claude", AgentResult(ok=True, structured=GOOD))
+    router = ReviewerRouter(primary, fallback, switch_at_used_percent=90, clock=lambda: 1000.0)
+    asyncio.run(router.run("p", cwd=tmp_path, log_path=tmp_path / "l.jsonl", session_id="s", effort="high", contract="PLAN"))
+    assert seen == [{"name": "codex", "effort": "high", "contract": "PLAN", "session": "s"},
+                    {"name": "claude", "effort": "high", "contract": "PLAN", "session": None}]

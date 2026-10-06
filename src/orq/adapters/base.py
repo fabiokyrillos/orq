@@ -44,7 +44,12 @@ class Agent(Protocol):
         session_id: str | None = None,
         run_dir: Path | None = None,
         on_event: EventCallback | None = None,
-    ) -> AgentResult: ...
+        model: str | None = None,
+        effort: str | None = None,
+        contract: object | None = None,
+    ) -> AgentResult:
+        """model: implementer model override per call; effort and contract: reviewer reasoning effort and output schema."""
+        ...
 
 
 def split_command(value: str) -> list[str]:

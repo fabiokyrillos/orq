@@ -23,21 +23,21 @@ class Crash(RuntimeError):
 class CrashingImplementer(FakeImplementer):
     """Writes partial work then raises, like a killed process would leave it."""
 
-    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         if self.calls == 0:
             self.calls += 1
             self.prompts.append(prompt)
             (cwd / "partial.txt").write_text("half\n", encoding="utf-8")
             raise Crash("killed")
-        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event)
+        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event, **kwargs)
 
 
 class CrashingReviewer(FakeReviewer):
-    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         if not self.prompts:
             self.prompts.append(prompt)
             raise Crash("killed")
-        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event)
+        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event, **kwargs)
 
 
 def state_file(paths: OrqPaths, run_id: str) -> Path:

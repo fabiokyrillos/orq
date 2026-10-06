@@ -40,16 +40,18 @@ class ReviewerRouter:
         return self.active.name
 
     async def run(self, prompt: str, *, cwd: Path, log_path: Path, session_id: str | None = None,
-                  run_dir: Path | None = None, on_event: EventCallback | None = None) -> AgentResult:
+                  run_dir: Path | None = None, on_event: EventCallback | None = None, model: str | None = None,
+                  effort: str | None = None, contract: object | None = None) -> AgentResult:
+        common = dict(cwd=cwd, log_path=log_path, run_dir=run_dir, on_event=on_event, effort=effort, contract=contract)
         agent = self.active
         if agent is self.fallback:
             # The fallback cannot resume the primary's session.
-            return await self.fallback.run(prompt, cwd=cwd, log_path=log_path, session_id=None, run_dir=run_dir, on_event=on_event)
-        result = await self.primary.run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event)
+            return await self.fallback.run(prompt, session_id=None, **common)
+        result = await self.primary.run(prompt, session_id=session_id, **common)
         snapshot = (result.rate_limit or {}).get("primary") or {}
         if result.error_kind == "rate_limit":
             self._switch(snapshot.get("resets_at"))
-            return await self.fallback.run(prompt, cwd=cwd, log_path=log_path, session_id=None, run_dir=run_dir, on_event=on_event)
+            return await self.fallback.run(prompt, session_id=None, **common)
         used = snapshot.get("used_percent")
         if isinstance(used, (int, float)) and used >= self.threshold:
             self._switch(snapshot.get("resets_at"))

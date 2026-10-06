@@ -41,6 +41,14 @@ def main() -> int:
         err = {"type": "error", "error": {"type": "invalid_request_error", "code": "invalid_json_schema", "message": "Invalid schema"}, "status": 400}
         lines += [{"type": "error", "message": json.dumps(err)}, {"type": "turn.failed", "error": {"message": json.dumps(err)}}]
         code = 1
+    elif scenario == "plan":
+        plan = {"status": "plan", "summary": "Two steps.", "human": None, "milestones": [
+            {"title": "Write greet.py", "goal": "Add greet()", "done_when": "greet('x') returns Hello, x!", "difficulty": "hard"},
+            {"title": "Add tests", "goal": "Cover greet()", "done_when": "unittest passes", "difficulty": "mechanical"}]}
+        lines += [message(json.dumps(plan), "item_0"), {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}]
+        if "-o" in argv:
+            with open(argv[argv.index("-o") + 1], "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(plan))
     elif scenario == "rate_limit":
         # Shape from Phase 0 section 5: a generic error event, then turn.failed, exit 1. Message text is still unverified.
         msg = "You've reached your usage limit. Try again at 10pm."

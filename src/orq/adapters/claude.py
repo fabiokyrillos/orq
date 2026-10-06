@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 
 from orq.adapters.base import AgentResult, Completed, EventCallback, clean_env, split_command, stream_process
-from orq.adapters.schema import REVIEW_SCHEMA, validate_review
+from orq.adapters.schema import REVIEW_CONTRACT, OutputContract
 from orq.guard.settings import SETTINGS_NAME
 
 # Owner's global plugins, hooks and MCP servers stay out; --settings hooks still load (Phase 0).
@@ -82,11 +82,13 @@ class ClaudeImplementer:
         self._extra = extra_args or []
 
     async def run(self, prompt: str, *, cwd: Path, log_path: Path, session_id: str | None = None,
-                  run_dir: Path | None = None, on_event: EventCallback | None = None) -> AgentResult:
+                  run_dir: Path | None = None, on_event: EventCallback | None = None, model: str | None = None,
+                  effort: str | None = None, contract: OutputContract | None = None) -> AgentResult:
         sid = session_id or str(uuid.uuid4())
         session_flag = ["--resume", sid] if session_id else ["--session-id", sid]
+        # A resumed session keeps its context under a different --model (Phase 0); routing per milestone relies on it.
         argv = [*(self._prefix or claude_argv()), "-p", "--output-format", "stream-json", "--verbose",
-                *ISOLATION_FLAGS, "--dangerously-skip-permissions", "--model", self.model,
+                *ISOLATION_FLAGS, "--dangerously-skip-permissions", "--model", model or self.model,
                 "--append-system-prompt", self.system_prompt, *session_flag]
         pid_file = None
         if run_dir is not None:
@@ -110,16 +112,18 @@ class ClaudeReviewer:
         self._prefix = argv_prefix
 
     async def run(self, prompt: str, *, cwd: Path, log_path: Path, session_id: str | None = None,
-                  run_dir: Path | None = None, on_event: EventCallback | None = None) -> AgentResult:
+                  run_dir: Path | None = None, on_event: EventCallback | None = None, model: str | None = None,
+                  effort: str | None = None, contract: OutputContract | None = None) -> AgentResult:
+        contract = contract or REVIEW_CONTRACT
         argv = [*(self._prefix or claude_argv()), "-p", "--output-format", "stream-json", "--verbose",
-                *ISOLATION_FLAGS, "--model", self.model, "--tools", "Read,Grep,Glob",
-                "--json-schema", json.dumps(REVIEW_SCHEMA)]
+                *ISOLATION_FLAGS, "--model", model or self.model, "--tools", "Read,Grep,Glob",
+                "--json-schema", json.dumps(contract.schema)]
         if run_dir:
             argv += ["--add-dir", str(run_dir)]
         completed = await stream_process(argv, cwd=cwd, stdin_text=prompt, log_path=log_path, env=clean_env(), on_event=on_event)
         result = _result_from(completed, session_id)
         if result.ok:
-            problems = validate_review(result.structured)
+            problems = contract.validate(result.structured)
             if problems:
                 return AgentResult(ok=False, text=result.text, session_id=result.session_id, usage=result.usage,
                                    error="; ".join(problems), error_kind="invalid_output", exit_code=result.exit_code)
