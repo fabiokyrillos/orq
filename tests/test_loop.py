@@ -859,3 +859,62 @@ def test_gate_final_review_needs_human(env) -> None:
     runner = make(implementer, reviewer, human=lambda d: asked.append(d) or "0")
     assert asyncio.run(runner.execute()) is RunState.DONE
     assert asked[0].question == "Ship without the badge?" and "Ship without the badge?" in implementer.prompts[1]
+
+
+# Phase 3: hygiene seen in the sandbox runs
+
+
+def test_orchestrator_milestones_are_dropped_from_the_plan(env) -> None:
+    make, paths, _ = env
+    planner = FakePlanner([plan(("Add greeting module", "mechanical"), ("Run check command", "mechanical"), ("Open and merge PR", "mechanical"))])
+    implementer = FakeImplementer([ok()])
+    runner = make(implementer, FakeReviewer([review("done", None)]), planner=planner)
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert "Current milestone (1/1): Add greeting module" in implementer.prompts[0]
+    events = gate_events(paths, runner.run_id)
+    assert any(e["type"] == "milestones_dropped" and e["titles"] == ["Run check command", "Open and merge PR"] for e in events)
+    assert "Run check command" not in (paths.run_dir(runner.run_id) / "PLAN.md").read_text(encoding="utf-8")
+
+
+def sandbox_complaint() -> AgentResult:
+    human_obj = {"decision_type": "blocked", "question": "Should the environment be fixed to provide `python`? It cannot be found.",
+                 "options": ["fix", "keep"], "recommendation": 0}
+    result = review("needs_human", None, human=human_obj)
+    result.structured["issues"] = [{"severity": "blocker", "description": "`python` is not recognized on PATH, so the check could not be verified."}]
+    return result
+
+
+def test_reviewer_sandbox_complaint_is_retried_with_a_correction(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    reviewer = FakeReviewer([sandbox_complaint(), review("done", None), review("done", None)])
+    runner = make(FakeImplementer([ok()]), reviewer, human=lambda d: asked.append(d) or "0")
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert asked == [] and len(reviewer.prompts) == 3
+    assert "## Correction" in reviewer.prompts[1] and "## Correction" not in reviewer.prompts[0]
+    assert any(e["type"] == "reviewer_sandbox_retry" for e in gate_events(paths, runner.run_id))
+
+
+def test_reviewer_sandbox_complaint_persisting_is_stripped_to_continue(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    implementer = FakeImplementer([ok(), ok()])
+    reviewer = FakeReviewer([sandbox_complaint(), sandbox_complaint(), review("done", None), review("done", None)])
+    runner = make(implementer, reviewer, human=lambda d: asked.append(d) or "0")
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert asked == [] and implementer.calls == 2
+    assert "orchestrator ran the check command" in implementer.prompts[1]
+    assert any(e["type"] == "reviewer_sandbox_complaint_stripped" for e in gate_events(paths, runner.run_id))
+
+
+def test_sandbox_complaint_with_failing_check_is_a_real_question(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    task_text = TASK.replace("python -c \"print('checks ok')\"", "python -c \"import sys; sys.exit(1)\"")
+    runner = make(FakeImplementer([ok()]), FakeReviewer([sandbox_complaint()]), human=None, task_text=task_text)
+    assert asyncio.run(runner.execute()) is RunState.AWAITING_HUMAN
+    pending = runner.store.pending_decisions(runner.run_id)
+    assert len(pending) == 1 and pending[0].source == "reviewer" and asked == []

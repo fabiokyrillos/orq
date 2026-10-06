@@ -93,7 +93,7 @@ QUEUED → PLANNING → AWAITING_PLAN_APPROVAL (optional) → IMPLEMENTING
 Side states: AWAITING_HUMAN, PAUSED_RATE_LIMIT, PAUSED, FAILED, ABORTED
 ```
 
-Every transition is written to `events.jsonl` and to SQLite before it takes effect. `state.json` in the run dir is the checkpoint: it records the phase inside the iteration (`setup`, `implement`, `verify`, `review`, `await`, `finalize`, `done`), the pending decision and everything the next step needs. `orq resume <run_id>` rebuilds the run from it and continues through the same code path as a live run (Phase 2):
+Every transition is written to `events.jsonl` and to SQLite before it takes effect. `state.json` in the run dir is the checkpoint: it records the phase inside the iteration (`setup`, `plan`, `implement`, `verify`, `review`, `await`, `finalize`, `gate_ci`, `gate_review`, `gate_merge`, `done`), the pending decision and everything the next step needs. `orq resume <run_id>` rebuilds the run from it and continues through the same code path as a live run (Phase 2):
 
 * A crash during an implementer turn keeps the uncommitted work; the same session is re-invoked with an "interrupted turn" note. The orphaned CLI child (pid kept in `child.pid`) is killed first.
 * `orq resume` refuses a run whose process is still alive, a `DONE`/`ABORTED` run, and a worktree whose HEAD moved away from the last recorded commit (the one exception is the iteration commit itself, when the crash landed between the commit and the next checkpoint write).
@@ -111,7 +111,7 @@ Every transition is written to `events.jsonl` and to SQLite before it takes effe
 7. Run the local check command.
 8. Commit the iteration on the run branch, committing only the index from step 5. Files the check command generates (caches, build output) never enter the commit, and the commit is exactly what was scanned.
 9. Run the reviewer with: task, milestone, diff summary, check results, implementer's final message. The reviewer reads the repo itself.
-10. Act on reviewer status: `continue` → next iteration, `needs_human` → `AWAITING_HUMAN`, `done` → next milestone or `FINALIZING`. A `done` that still lists a `blocker` or `major` issue is treated as `continue`, with the issues as the next prompt (deterministic, seen in Phase 1).
+10. Act on reviewer status: `continue` → next iteration, `needs_human` → `AWAITING_HUMAN`, `done` → next milestone or `FINALIZING`. Phase 3: `done` means the current milestone's `done_when` holds; orq advances `milestone_index` and the next prompt opens the next milestone. `done` on the last milestone enters the merge gate. A clean `done` never feeds the no-progress rules (advancing a milestone with an empty diff is progress). A `done` that still lists a `blocker` or `major` issue is treated as `continue`, with the issues as the next prompt (deterministic, seen in Phase 1).
 11. Check limits and no progress rules (section 10).
 
 ## 8. Contracts
@@ -175,6 +175,21 @@ Implementer standing rule (via `--append-system-prompt`): on a business decision
 {"decision_type": "business", "question": "...", "options": ["...", "..."], "recommendation": 0}
 ```
 ````
+
+### 8.5 Planner output (Phase 3; same strict-schema rules as 8.2)
+
+```json
+{
+  "status": "plan | needs_human",
+  "summary": "string",
+  "milestones": [
+    { "title": "string", "goal": "string", "done_when": "string", "difficulty": "hard | mechanical" }
+  ],
+  "human": { "decision_type": "...", "question": "...", "options": ["..."], "recommendation": 0 }
+}
+```
+
+One to eight ordered milestones; `milestones` is empty and `human` set when `status` is `needs_human`. The planner is the reviewer agent at `[reviewer].final_effort`, read only. The plan is written to `<run_dir>/PLAN.md` and kept in `state.json`; both prompts carry the full plan and the current milestone. `## Plan approval: required` raises `AWAITING_PLAN_APPROVAL` with options `approve` and `revise`; free text is a revision request and the planner runs again with it.
 
 ### 8.4 Decision object (stored in SQLite)
 
@@ -307,6 +322,12 @@ Confirmed in Phase 0:
 * `gh pr merge` does not wait for checks; it merged a PR whose CI was still queued. Step 1 is orq's job and must complete before the merge call.
 * `gh pr checks <n> --json name,state,bucket` exits 1 with `no checks reported` for about a minute after PR creation; treat that as pending. Free runners can sit in `QUEUED` for many minutes, so the CI wait has a long timeout (default 60 min) and polls every 20 to 30 s.
 * Merging from inside the worktree works. `--delete-branch` removes the remote branch and skips the local delete with a warning (exit 0); orq removes the worktree and local branch itself.
+Implemented in Phase 3 as resumable phases after `finalize` (push, PR):
+
+* `gate_ci`: when `origin/<base>` moved, `git rebase` and `git push --force-with-lease` (orq's push, never the implementer's; a conflict aborts the rebase and asks the owner `retry`/`abort`); then `CiWatcher` polls `gh pr checks --json name,state,bucket,link` every `[merge].poll_seconds` for up to `[merge].ci_timeout_minutes`. "No checks reported" is pending during `[merge].ci_grace_minutes`, then the owner is asked (`merge without CI`/`abort`). A failing check whose run has no job steps is re-run (`gh run rerun`, at most `[merge].max_ci_reruns`); a real failure sends the run back to the implementer with the tail of `gh run view --log-failed`.
+* `gate_review`: final reviewer pass at `[reviewer].final_effort` against the whole task with the PR diff stat and the CI result; `done` with no blocker/major issue proceeds, anything else sends the run back to the implementer. Gate restarts are bounded by `[merge].max_gate_rounds`.
+* `gate_merge`: no pending decisions, base re-checked (back to `gate_ci` if it moved), secret scan of the range, `gh pr merge <n> --<strategy> --delete-branch`, `gh pr view --json state` must say `MERGED`, worktree and local branch removed (`[git].keep_worktree` keeps them for debugging).
+
 * A run can fail without ever running: after 15 minutes GitHub cancels a job no hosted runner picked up (`conclusion: failure`, job `cancelled`, no steps, annotation `The job was not acquired by Runner of type hosted even after multiple attempts`). The verifier treats that as an infrastructure failure and re-runs it (`gh run rerun <id>`, default 3 attempts) instead of starting a new implementer iteration.
 
 ## 11. Storage and logs
@@ -350,7 +371,7 @@ Never inside the repo (repos are public):
 * Any other agent failure (`error`, `auth`) is never retried blindly and no longer ends the run as `FAILED`: it raises a `blocked` decision with `retry` and `abort`. `FAILED` is reserved for invariants (invalid reviewer output after a retry, limits exceeded).
 * Keep reviewer prompts lean: the reviewer reads the repo; send only task, milestone, diff summary, check results, implementer final message.
 * Reviewer effort: low for routine iterations, high for planning and the final merge gate.
-* Implementer model per step: planner may tag milestones as `hard` (Opus) or `mechanical` (Sonnet).
+* Implementer model per step: planner may tag milestones as `hard` (Opus) or `mechanical` (Sonnet). Phase 3: the model is passed on every implementer call (`--model` on a resumed session keeps the context, Phase 0) and recorded as an `implementer_model` event; reviewer effort is `routine_effort` for milestone reviews and `final_effort` for planning and the final review.
 
 ## 13. Configuration (example)
 
@@ -378,6 +399,14 @@ merge_strategy = "squash"
 worktree_root = "~/.orq/worktrees"
 protected_paths = [".github/**", "migrations/**", "**/.env*"]
 sandbox_repos = []          # optional allowlist; empty allows any repo
+keep_worktree = false       # true keeps the worktree after the merge (debugging)
+
+[merge]
+poll_seconds = 20
+ci_timeout_minutes = 60
+ci_grace_minutes = 5
+max_ci_reruns = 3
+max_gate_rounds = 3
 
 [guard]
 max_net_deleted_lines = 300

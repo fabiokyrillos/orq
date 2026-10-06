@@ -21,6 +21,7 @@ from orq.adapters.base import Agent, AgentResult
 from orq.adapters.schema import PLAN_CONTRACT, REVIEW_CONTRACT, validate_plan, validate_review
 from orq.config import Config
 from orq.core.checkpoint import Checkpoint
+from orq.core.hygiene import drop_orchestrator_milestones, review_complains_about_sandbox, strip_sandbox_complaints
 from orq.core.models import Decision, RunRecord, RunState, new_decision_id, new_run_id
 from orq.core.procs import kill_tree, pid_alive
 from orq.core.progress import ProgressTracker
@@ -276,16 +277,20 @@ class Runner:
                 decision_type=str(h.get("decision_type", "ambiguity")), question=str(h.get("question", "")),
                 options=[str(o) for o in h.get("options", [])], recommendation=h.get("recommendation")), payload={})
             return
-        self.cp.plan = {"summary": plan.get("summary", ""), "milestones": plan["milestones"]}
+        milestones, dropped = drop_orchestrator_milestones(plan["milestones"])
+        if dropped:
+            # Verification, commits, pushes and PRs belong to orq (Phase 3 sandbox runs showed planners adding them anyway).
+            self.rundir.event("milestones_dropped", titles=[m["title"] for m in dropped])
+        self.cp.plan = {"summary": plan.get("summary", ""), "milestones": milestones}
         self.cp.milestone_index = 0
         self.cp.plan_feedback = None
         (self.rundir.path / "PLAN.md").write_text(plan_markdown(self.cp.plan), encoding="utf-8")
-        self.rundir.event("plan", milestones=[(m["title"], m["difficulty"]) for m in plan["milestones"]], summary=plan.get("summary", ""))
+        self.rundir.event("plan", milestones=[(m["title"], m["difficulty"]) for m in milestones], summary=plan.get("summary", ""))
         if self.task.plan_approval == "required":
-            titles = "\n".join(f"{i + 1}. [{m['difficulty']}] {m['title']}" for i, m in enumerate(plan["milestones"]))
+            titles = "\n".join(f"{i + 1}. [{m['difficulty']}] {m['title']}" for i, m in enumerate(milestones))
             self._raise_decision("plan_approval", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="planner", decision_type="business",
-                question=f"Plan proposed ({len(plan['milestones'])} milestones):\n{titles}\nApprove it, or answer with what to change.",
+                question=f"Plan proposed ({len(milestones)} milestones):\n{titles}\nApprove it, or answer with what to change.",
                 options=["approve", "revise"], recommendation=0), payload={}, state=RunState.AWAITING_PLAN_APPROVAL)
             return
         self._next_iteration()
@@ -401,15 +406,7 @@ class Runner:
             plan=self.cp.plan, milestone_index=self.cp.milestone_index,
         )
         (itdir / "reviewer.prompt.md").write_text(prompt, encoding="utf-8")
-        effort = self.config.reviewer.routine_effort
-        result = await self._call("reviewer", self.reviewer, prompt, itdir / "reviewer.stream.jsonl", None, effort=effort, contract=REVIEW_CONTRACT)
-        if result.error_kind == "invalid_output":
-            self.rundir.event("reviewer_invalid_output", iteration=it, error=result.error)
-            result = await self._call("reviewer", self.reviewer, prompt, itdir / "reviewer.stream.jsonl", None, effort=effort, contract=REVIEW_CONTRACT)
-        problems = validate_review(result.structured)
-        if problems:
-            raise _Stop(RunState.FAILED, "reviewer output invalid: " + "; ".join(problems))
-        review: dict = result.structured  # type: ignore[assignment]
+        review = await self._run_review(prompt, itdir / "reviewer.stream.jsonl", effort=self.config.reviewer.routine_effort, check_ok=check.ok)
         (itdir / "reviewer.output.json").write_text(json.dumps(review, indent=2), encoding="utf-8")
         self.cp.discarded = None
         self.cp.summaries[str(it)] = str(review.get("summary", ""))
@@ -454,6 +451,30 @@ class Runner:
                 recommendation=1), payload={"rollback_to": rule.rollback_to, "target": target})
             return
         self._after_review()
+
+    async def _run_review(self, prompt: str, log_path: Path, *, effort: str, check_ok: bool) -> dict:
+        """Call the reviewer, retry once on invalid output, correct sandbox-tooling complaints once, strip the rest."""
+        review = await self._review_once(prompt, log_path, effort)
+        if check_ok and review_complains_about_sandbox(review):
+            self.rundir.event("reviewer_sandbox_retry", iteration=self.cp.iteration)
+            correction = (prompt + "\n\n## Correction\nYour previous answer reported that the check command or python could not be run "
+                          "in your environment. The orchestrator already ran the check command in the real environment and it passed "
+                          "(see the result above). Do not run it and do not report tool availability. Answer again on the code alone.\n")
+            review = await self._review_once(correction, log_path, effort)
+            review, stripped = strip_sandbox_complaints(review)
+            if stripped:
+                self.rundir.event("reviewer_sandbox_complaint_stripped", iteration=self.cp.iteration)
+        return review
+
+    async def _review_once(self, prompt: str, log_path: Path, effort: str) -> dict:
+        result = await self._call("reviewer", self.reviewer, prompt, log_path, None, effort=effort, contract=REVIEW_CONTRACT)
+        if result.error_kind == "invalid_output":
+            self.rundir.event("reviewer_invalid_output", iteration=self.cp.iteration, error=result.error)
+            result = await self._call("reviewer", self.reviewer, prompt, log_path, None, effort=effort, contract=REVIEW_CONTRACT)
+        problems = validate_review(result.structured)
+        if problems:
+            raise _Stop(RunState.FAILED, "reviewer output invalid: " + "; ".join(problems))
+        return result.structured  # type: ignore[return-value]
 
     def _after_review(self) -> None:
         if self.cp.denied_actions:
@@ -553,15 +574,7 @@ class Runner:
             decisions=self.rundir.decisions_text(), plan=self.cp.plan, milestone_index=self.cp.milestone_index, final=True, ci_result=ci_note,
         )
         (itdir / "final_review.prompt.md").write_text(prompt, encoding="utf-8")
-        effort = self.config.reviewer.final_effort
-        result = await self._call("reviewer", self.reviewer, prompt, itdir / "final_review.stream.jsonl", None, effort=effort, contract=REVIEW_CONTRACT)
-        if result.error_kind == "invalid_output":
-            self.rundir.event("reviewer_invalid_output", iteration=it, error=result.error, final=True)
-            result = await self._call("reviewer", self.reviewer, prompt, itdir / "final_review.stream.jsonl", None, effort=effort, contract=REVIEW_CONTRACT)
-        problems = validate_review(result.structured)
-        if problems:
-            raise _Stop(RunState.FAILED, "final reviewer output invalid: " + "; ".join(problems))
-        review: dict = result.structured  # type: ignore[assignment]
+        review = await self._run_review(prompt, itdir / "final_review.stream.jsonl", effort=self.config.reviewer.final_effort, check_ok=check.ok)
         (itdir / "final_review.output.json").write_text(json.dumps(review, indent=2), encoding="utf-8")
         self.rundir.event("final_review", status=review["status"], summary=str(review.get("summary", ""))[:300])
         if review["status"] == "needs_human":

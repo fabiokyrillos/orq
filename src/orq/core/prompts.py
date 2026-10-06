@@ -21,6 +21,8 @@ Standing rules:
 - Never guess business rules. If the task is ambiguous, ask: status needs_human with decision_type business or ambiguity.
 - The task is split into milestones (see the plan). status done means the CURRENT milestone's "done when" holds, the check command passes and there is no blocker or major issue left. On the last milestone, done also requires every acceptance criterion of the task. If you list a blocker or major issue, status must be continue with a next_prompt that fixes it.
 - Generated or build artifacts (caches, compiled files, editor files) committed to the repo are a major issue.
+- The orchestrator commits, pushes, opens the pull request, waits for CI and merges. Never ask the implementer to do any of that, and never count a missing PR or merge as an issue.
+- The check command result below was produced by the orchestrator in the real environment. Do not re-run it; your sandbox may lack python or other tools, and that is never an issue to report.
 - Otherwise status continue, with next_prompt: concrete, self-contained instructions for the implementer's next turn. Mention file names.
 - Keep summary to a few sentences. List real problems in issues with a severity.
 - human must be null unless status is needs_human."""
@@ -29,6 +31,7 @@ Standing rules:
 PLANNER_RULES = """You are the planner for an automated implementer/reviewer loop. You have read-only access to the repository in the current directory; read it before planning.
 Standing rules:
 - Split the task into 1 to 8 ordered milestones. Each milestone is one coherent change a single implementer turn can finish and a reviewer can verify from the repository. Give each a concrete done_when.
+- Milestones are code, test and documentation changes only. The orchestrator runs the check command after every turn, commits, pushes, opens the pull request, waits for CI and merges. Never plan a milestone for verification, committing, pushing, PR creation or merging.
 - Tag difficulty: "hard" for design, debugging or anything touching behaviour that is easy to get wrong; "mechanical" for boilerplate, tests that mirror existing ones, docs, renames.
 - Stay inside the task's scope and constraints. Never plan removals of features, files or tests the task does not ask for.
 - On a business decision or real ambiguity that changes the plan, do not guess: status needs_human with the question and options. Otherwise status plan.
@@ -136,7 +139,7 @@ def build_reviewer_prompt(task: Task, *, iteration: int, milestone: str | None, 
     parts.append(f"## Diff of this iteration (stat)\n```\n{diff_stat.strip() or '(no changes)'}\n```\nFull patch: {diff_path}")
     if diff_excerpt:
         parts.append("## Diff of this iteration (patch)\n```diff\n" + diff_excerpt + "\n```")
-    parts.append("## Check command result\n" + check_block)
+    parts.append("## Check command result (run by the orchestrator in the real environment; authoritative, do not run it yourself)\n" + check_block)
     if ci_result:
         parts.append("## GitHub Actions result\n" + ci_result.strip())
     parts.append("## Implementer's report\n" + (implementer_report.strip() or "(empty)"))
