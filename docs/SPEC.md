@@ -486,6 +486,8 @@ Status: complete on 2026-10-06 (see `docs/phase2-findings.md`). Also delivered: 
 
 **Exit criteria:** a task goes from TASK.md to merged PR with zero owner input when no decision is needed.
 
+Status: complete on 2026-10-06 (see `docs/phase3-findings.md`).
+
 ### Phase 4: remote human
 
 * Dashboard with both live streams, run list, decision controls.
