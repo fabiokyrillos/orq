@@ -11,6 +11,7 @@ from pathlib import Path
 
 from orq.adapters.base import AgentResult, Completed, EventCallback, clean_env, split_command, stream_process
 from orq.adapters.schema import REVIEW_SCHEMA, validate_review
+from orq.guard.settings import SETTINGS_NAME
 
 # Owner's global plugins, hooks and MCP servers stay out; --settings hooks still load (Phase 0).
 ISOLATION_FLAGS = ["--setting-sources", "project,local", "--strict-mcp-config"]
@@ -86,9 +87,18 @@ class ClaudeImplementer:
         session_flag = ["--resume", sid] if session_id else ["--session-id", sid]
         argv = [*(self._prefix or claude_argv()), "-p", "--output-format", "stream-json", "--verbose",
                 *ISOLATION_FLAGS, "--dangerously-skip-permissions", "--model", self.model,
-                "--append-system-prompt", self.system_prompt, *session_flag, *self._extra]
+                "--append-system-prompt", self.system_prompt, *session_flag]
+        pid_file = None
+        if run_dir is not None:
+            # The runner writes the guard hook settings into the run dir (SPEC 10.3); attach them when present.
+            settings = run_dir / SETTINGS_NAME
+            if settings.exists():
+                argv += ["--settings", str(settings)]
+            pid_file = run_dir / "child.pid"
+        argv += self._extra
         env = clean_env({"ORQ_RUN_DIR": str(run_dir)} if run_dir else None)
-        completed = await stream_process(argv, cwd=cwd, stdin_text=prompt, log_path=log_path, env=env, on_event=on_event)
+        completed = await stream_process(argv, cwd=cwd, stdin_text=prompt, log_path=log_path, env=env, on_event=on_event,
+                                         pid_file=pid_file)
         return _result_from(completed, sid)
 
 

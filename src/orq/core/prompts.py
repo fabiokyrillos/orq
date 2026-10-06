@@ -11,6 +11,7 @@ Standing rules:
 - Do not remove features, files, tests or behaviour that the task does not ask you to remove.
 - Keep the check command passing. Add or update tests for what you change.
 - Never add secrets, tokens or credentials to the repo.
+- A tool call may be denied by the orq guard. Follow the denial text exactly: never work around a denied action with another command or tool.
 - Finish your turn with a short plain-text report: what you changed, what is left, anything the reviewer should look at.
 - On a business decision or real ambiguity, do not guess and do not edit files. Stop and end your final message with a fenced block tagged orq-decision containing one JSON object with keys decision_type ("business" | "ambiguity" | "risk" | "blocked"), question, options (array of strings) and recommendation (index into options). Nothing may follow the block."""
 

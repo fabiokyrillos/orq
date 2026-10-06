@@ -36,6 +36,27 @@ def implementer(**kwargs) -> ClaudeImplementer:
 
 # ClaudeImplementer
 
+def test_implementer_adds_settings_when_run_dir_has_hook(record, tmp_path, monkeypatch) -> None:
+    from orq.guard.settings import write_hook_settings
+    scenario(monkeypatch, "ok")
+    run_dir = tmp_path / "run"
+    write_hook_settings(run_dir, worktree=tmp_path / "wt", protected_paths=[])
+
+    run(implementer(), "hi", tmp_path, run_dir=run_dir)
+
+    argv = record()["argv"]
+    assert argv[argv.index("--settings") + 1] == str(run_dir / "claude-settings.json")
+    assert record()["child_pid"].isdigit()                 # pid file was present while the CLI ran
+    assert not (run_dir / "child.pid").exists()            # and removed afterwards
+
+
+def test_implementer_without_hook_settings_has_no_settings_flag(record, tmp_path, monkeypatch) -> None:
+    scenario(monkeypatch, "ok")
+    run(implementer(), "hi", tmp_path, run_dir=tmp_path / "run")
+    assert "--settings" not in record()["argv"]
+
+
+
 def test_implementer_sends_prompt_on_stdin_with_isolation_flags(record, tmp_path, monkeypatch) -> None:
     scenario(monkeypatch, "ok")
 

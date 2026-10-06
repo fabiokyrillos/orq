@@ -76,14 +76,21 @@ async def stream_process(
     log_path: Path,
     env: dict[str, str],
     on_event: EventCallback | None = None,
+    pid_file: Path | None = None,
 ) -> Completed:
-    """Run a CLI, feed the prompt on stdin, mirror every stdout line to log_path, parse JSON lines."""
+    """Run a CLI, feed the prompt on stdin, mirror every stdout line to log_path, parse JSON lines.
+
+    While the child runs, its pid is kept in pid_file (if given) so a resumed orq can kill an orphan.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=str(cwd), env=env,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     assert proc.stdin and proc.stdout and proc.stderr
+    if pid_file is not None:
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(proc.pid), encoding="utf-8")
 
     async def feed() -> None:
         proc.stdin.write(stdin_text.encode("utf-8"))
@@ -117,4 +124,6 @@ async def stream_process(
 
     _, _, stderr = await asyncio.gather(feed(), read_stdout(), read_stderr())
     exit_code = await proc.wait()
+    if pid_file is not None:
+        pid_file.unlink(missing_ok=True)
     return Completed(exit_code, events, stderr.decode("utf-8", errors="replace"), raw_lines)

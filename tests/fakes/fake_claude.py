@@ -25,6 +25,15 @@ def init(session_id: str = "sid-1") -> dict:
     return {"type": "system", "subtype": "init", "session_id": session_id, "model": "claude-sonnet-5", "tools": ["Read"], "cwd": os.getcwd()}
 
 
+def _read_pid_file() -> str:
+    run_dir = os.environ.get("ORQ_RUN_DIR")
+    path = os.path.join(run_dir, "child.pid") if run_dir else ""
+    if path and os.path.exists(path):
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    return ""
+
+
 def main() -> int:
     argv = sys.argv[1:]
     stdin = sys.stdin.read()
@@ -35,7 +44,8 @@ def main() -> int:
         session_id = argv[argv.index("--resume") + 1]
     record = {"argv": argv, "stdin": stdin, "cwd": os.getcwd(),
               "env_claude_keys": sorted(k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC"))),
-              "orq_run_dir": os.environ.get("ORQ_RUN_DIR")}
+              "orq_run_dir": os.environ.get("ORQ_RUN_DIR"),
+              "child_pid": _read_pid_file()}
     with open(os.environ["FAKE_RECORD"], "w", encoding="utf-8") as handle:
         json.dump(record, handle)
 
