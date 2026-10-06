@@ -222,6 +222,13 @@ def status(run_id: str | None = typer.Argument(None)) -> None:
         raise typer.Exit(1)
     typer.echo(f"{item.run_id}  {item.state.value}  iteration {item.iteration}")
     typer.echo(f"repo {item.repo}  branch {item.branch}\nworktree {item.worktree}\ntask {item.task_title}")
+    cp = Checkpoint.load(paths.run_dir(run_id) / "state.json")
+    if cp and cp.plan and cp.plan.get("milestones"):
+        milestones = cp.plan["milestones"]
+        index = min(cp.milestone_index, len(milestones) - 1)
+        typer.echo(f"milestone {index + 1}/{len(milestones)}: {milestones[index]['title']} [{milestones[index]['difficulty']}]")
+    if cp and cp.pr_url:
+        typer.echo(f"pr {cp.pr_url}")
     for decision in store.pending_decisions(run_id):
         typer.echo(f"\npending {decision.decision_id} ({decision.source}, {decision.decision_type}): {decision.question}")
         for index, option in enumerate(decision.options):

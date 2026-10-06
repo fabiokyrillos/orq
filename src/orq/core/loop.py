@@ -18,13 +18,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from orq.adapters.base import Agent, AgentResult
-from orq.adapters.schema import validate_review
+from orq.adapters.schema import PLAN_CONTRACT, REVIEW_CONTRACT, validate_plan, validate_review
 from orq.config import Config
 from orq.core.checkpoint import Checkpoint
 from orq.core.models import Decision, RunRecord, RunState, new_decision_id, new_run_id
 from orq.core.procs import kill_tree, pid_alive
 from orq.core.progress import ProgressTracker
-from orq.core.prompts import IMPLEMENTER_RULES, build_implementer_prompt, build_reviewer_prompt, guard_outcome_lines
+from orq.core.prompts import (IMPLEMENTER_RULES, build_implementer_prompt, build_planner_prompt, build_reviewer_prompt,
+                              guard_outcome_lines, plan_markdown)
 from orq.core.ratelimit import claude_reset_time
 from orq.core.task import Task, parse_task
 from orq.git.manager import GitManager
@@ -44,8 +45,8 @@ DIFF_INLINE_LIMIT = 20_000
 CHECK_TIMEOUT_SECONDS = 1800
 PAUSE_FLAG = "pause.requested"
 RATE_LIMIT_JITTER_SECONDS = 60
-_PHASE_STATE = {"implement": RunState.IMPLEMENTING, "verify": RunState.VERIFYING, "review": RunState.REVIEWING,
-                "finalize": RunState.FINALIZING}
+_PHASE_STATE = {"plan": RunState.PLANNING, "implement": RunState.IMPLEMENTING, "verify": RunState.VERIFYING,
+                "review": RunState.REVIEWING, "finalize": RunState.FINALIZING}
 
 
 class SandboxError(RuntimeError):
@@ -71,11 +72,12 @@ class Runner:
     def __init__(self, *, config: Config, paths: OrqPaths, store: Store, task: Task, task_text: str,
                  git: GitManager, implementer: Agent, reviewer: Agent, scanner: SecretScanner, human: HumanInput | None,
                  clone_url: str | None = None, printer: Printer = print, run_id: str | None = None,
-                 checkpoint: Checkpoint | None = None) -> None:
+                 checkpoint: Checkpoint | None = None, planner: Agent | None = None) -> None:
         if config.git.sandbox_repos and task.repo not in config.git.sandbox_repos:
             raise SandboxError(f"{task.repo} is not listed in [git].sandbox_repos (empty list allows any repo)")
         self.config, self.paths, self.store, self.task = config, paths, store, task
         self.git, self.implementer, self.reviewer, self.scanner = git, implementer, reviewer, scanner
+        self.planner = planner or reviewer  # SPEC 4: the planner is the reviewer agent at high effort
         self.human, self.clone_url, self.print = human, clone_url, printer
         self._resumed_at = time.monotonic()
         if checkpoint is None:
@@ -108,7 +110,8 @@ class Runner:
 
     @classmethod
     def resume(cls, *, run_id: str, config: Config, paths: OrqPaths, store: Store, git: GitManager, implementer: Agent,
-               reviewer: Agent, scanner: SecretScanner, human: HumanInput | None, printer: Printer = print) -> Runner:
+               reviewer: Agent, scanner: SecretScanner, human: HumanInput | None, printer: Printer = print,
+               planner: Agent | None = None) -> Runner:
         """Rebuild a Runner from state.json. Refuses live runs, finished runs and worktrees that moved."""
         rundir = RunDir(paths.run_dir(run_id))
         cp = Checkpoint.load(rundir.path / "state.json")
@@ -148,7 +151,7 @@ class Runner:
         (rundir.path / PAUSE_FLAG).unlink(missing_ok=True)
         rundir.event("resume", phase=cp.phase, iteration=cp.iteration, state=cp.state)
         return cls(config=config, paths=paths, store=store, task=task, task_text=task_text, git=git, implementer=implementer,
-                   reviewer=reviewer, scanner=scanner, human=human, printer=printer, checkpoint=cp)
+                   reviewer=reviewer, scanner=scanner, human=human, printer=printer, checkpoint=cp, planner=planner)
 
     # persistence
 
@@ -182,6 +185,8 @@ class Runner:
                 phase = self.cp.phase
                 if phase == "setup":
                     self._setup()
+                elif phase == "plan":
+                    await self._plan()
                 elif phase == "implement":
                     await self._implement()
                 elif phase == "verify":
@@ -203,7 +208,7 @@ class Runner:
             return await self.execute()
         except _Stop as stop:
             if stop.state is RunState.AWAITING_HUMAN:  # already recorded when the decision was raised
-                return stop.state
+                return RunState(self.cp.state)
             self._transition(stop.state, reason=stop.reason)
             return stop.state
 
@@ -237,7 +242,55 @@ class Runner:
         self.cp.repo_path = str(repo_path)
         self.cp.base_commit = self.cp.last_commit = self.git.head(self.worktree)
         self.rundir.event("worktree", path=str(self.worktree), branch=self.cp.branch, base_commit=self.cp.base_commit)
+        self._set_phase("plan")
+
+    async def _plan(self) -> None:
+        """Planning step (SPEC 8.5): milestones with difficulty, optional owner approval."""
+        self._transition(RunState.PLANNING)
+        prompt = build_planner_prompt(self.task, decisions=self.rundir.decisions_text(), feedback=self.cp.plan_feedback)
+        (self.rundir.path / "planner.prompt.md").write_text(prompt, encoding="utf-8")
+        result = await self._call("planner", self.planner, prompt, self.rundir.path / "planner.stream.jsonl", None,
+                                  effort=self.config.reviewer.final_effort, contract=PLAN_CONTRACT)
+        if result.error_kind == "invalid_output":
+            self.rundir.event("planner_invalid_output", error=result.error)
+            result = await self._call("planner", self.planner, prompt, self.rundir.path / "planner.stream.jsonl", None,
+                                      effort=self.config.reviewer.final_effort, contract=PLAN_CONTRACT)
+        problems = validate_plan(result.structured)
+        if problems:
+            raise _Stop(RunState.FAILED, "planner output invalid: " + "; ".join(problems))
+        plan: dict = result.structured  # type: ignore[assignment]
+        if plan["status"] == "needs_human":
+            h = plan.get("human") or {}
+            self._raise_decision("planner", Decision(
+                decision_id=new_decision_id(), run_id=self.run_id, source="planner",
+                decision_type=str(h.get("decision_type", "ambiguity")), question=str(h.get("question", "")),
+                options=[str(o) for o in h.get("options", [])], recommendation=h.get("recommendation")), payload={})
+            return
+        self.cp.plan = {"summary": plan.get("summary", ""), "milestones": plan["milestones"]}
+        self.cp.milestone_index = 0
+        self.cp.plan_feedback = None
+        (self.rundir.path / "PLAN.md").write_text(plan_markdown(self.cp.plan), encoding="utf-8")
+        self.rundir.event("plan", milestones=[(m["title"], m["difficulty"]) for m in plan["milestones"]], summary=plan.get("summary", ""))
+        if self.task.plan_approval == "required":
+            titles = "\n".join(f"{i + 1}. [{m['difficulty']}] {m['title']}" for i, m in enumerate(plan["milestones"]))
+            self._raise_decision("plan_approval", Decision(
+                decision_id=new_decision_id(), run_id=self.run_id, source="planner", decision_type="business",
+                question=f"Plan proposed ({len(plan['milestones'])} milestones):\n{titles}\nApprove it, or answer with what to change.",
+                options=["approve", "revise"], recommendation=0), payload={}, state=RunState.AWAITING_PLAN_APPROVAL)
+            return
         self._next_iteration()
+
+    def _current_milestone(self) -> dict | None:
+        milestones = (self.cp.plan or {}).get("milestones") or []
+        if not milestones:
+            return None
+        return milestones[min(self.cp.milestone_index, len(milestones) - 1)]
+
+    def _implementer_model(self) -> str:
+        milestone = self._current_milestone() or {}
+        if milestone.get("difficulty") == "mechanical":
+            return self.config.implementer.mechanical_model
+        return self.config.implementer.default_model
 
     def _next_iteration(self) -> None:
         if self.cp.iteration >= self.config.limits.max_iterations:
@@ -255,10 +308,13 @@ class Runner:
         prompt = build_implementer_prompt(
             self.task, iteration=it, milestone=self.cp.outcome.get("milestone"), next_prompt=self.cp.outcome.get("next_prompt"),
             decisions=self.rundir.decisions_text(), previous_check=_check_from(self.cp.previous_check),
-            discarded=self.cp.discarded, interrupted=self.cp.interrupted,
+            discarded=self.cp.discarded, interrupted=self.cp.interrupted, plan=self.cp.plan, milestone_index=self.cp.milestone_index,
         )
         (itdir / "implementer.prompt.md").write_text(prompt, encoding="utf-8")
-        result = await self._call("implementer", self.implementer, prompt, itdir / "implementer.stream.jsonl", self.cp.implementer_session)
+        model = self._implementer_model()
+        self.rundir.event("implementer_model", iteration=it, model=model, milestone=self.cp.milestone_index + 1)
+        result = await self._call("implementer", self.implementer, prompt, itdir / "implementer.stream.jsonl", self.cp.implementer_session,
+                                  model=model)
         self.cp.interrupted = False
         if result.session_id:
             self.cp.implementer_session = result.session_id
@@ -332,12 +388,14 @@ class Runner:
             self.task, iteration=it, milestone=self.cp.outcome.get("milestone"), diff_stat=self.git.diff_stat(self.worktree, since=since),
             diff_path=str(itdir / "diff.patch"), diff_excerpt=patch if len(patch) <= DIFF_INLINE_LIMIT else None,
             check=check, implementer_report=self.cp.report, decisions=self.rundir.decisions_text(), discarded=self.cp.discarded,
+            plan=self.cp.plan, milestone_index=self.cp.milestone_index,
         )
         (itdir / "reviewer.prompt.md").write_text(prompt, encoding="utf-8")
-        result = await self._call("reviewer", self.reviewer, prompt, itdir / "reviewer.stream.jsonl", None)
+        effort = self.config.reviewer.routine_effort
+        result = await self._call("reviewer", self.reviewer, prompt, itdir / "reviewer.stream.jsonl", None, effort=effort, contract=REVIEW_CONTRACT)
         if result.error_kind == "invalid_output":
             self.rundir.event("reviewer_invalid_output", iteration=it, error=result.error)
-            result = await self._call("reviewer", self.reviewer, prompt, itdir / "reviewer.stream.jsonl", None)
+            result = await self._call("reviewer", self.reviewer, prompt, itdir / "reviewer.stream.jsonl", None, effort=effort, contract=REVIEW_CONTRACT)
         problems = validate_review(result.structured)
         if problems:
             raise _Stop(RunState.FAILED, "reviewer output invalid: " + "; ".join(problems))
@@ -363,10 +421,20 @@ class Runner:
             done = False
         else:
             next_prompt, done = review.get("next_prompt"), status == "done"
+        milestones = (self.cp.plan or {}).get("milestones") or []
+        if done and self.cp.milestone_index < len(milestones) - 1:
+            # This milestone is done; the task is not. Move on without entering the gate.
+            self.rundir.event("milestone_done", iteration=it, milestone=self.cp.milestone_index + 1, of=len(milestones))
+            self.cp.milestone_index += 1
+            nxt = milestones[self.cp.milestone_index]
+            next_prompt = (f"Milestone {self.cp.milestone_index} is done. Start milestone {self.cp.milestone_index + 1}: {nxt['title']}.\n"
+                           f"Goal: {nxt['goal']}\nDone when: {nxt['done_when']}")
+            done = False
         self.cp.outcome = {"next_prompt": next_prompt, "milestone": review.get("milestone"), "done": done}
 
-        rule = self.progress.record(it, diff_hash=self.cp.diff_hash or "", failure_signature=None if check.ok else check.signature,
-                                    next_prompt=next_prompt)
+        # A clean `done` (milestone advanced or task finished) is progress by definition; only stalls are recorded.
+        rule = None if status == "done" and not serious else self.progress.record(
+            it, diff_hash=self.cp.diff_hash or "", failure_signature=None if check.ok else check.signature, next_prompt=next_prompt)
         if rule is not None:
             self.rundir.event("no_progress", iteration=it, rule=rule.rule, rollback_to=rule.rollback_to, detail=rule.detail)
             target = f"rollback to iteration {rule.rollback_to}"
@@ -400,10 +468,10 @@ class Runner:
 
     # agents
 
-    async def _call(self, role: str, agent: Agent, prompt: str, log_path: Path, session_id: str | None) -> AgentResult:
+    async def _call(self, role: str, agent: Agent, prompt: str, log_path: Path, session_id: str | None, **options: object) -> AgentResult:
         """Run an agent; wait out Claude usage limits; turn any other failure into an owner decision."""
         while True:
-            result = await agent.run(prompt, cwd=self.worktree, log_path=log_path, session_id=session_id, run_dir=self.rundir.path)
+            result = await agent.run(prompt, cwd=self.worktree, log_path=log_path, session_id=session_id, run_dir=self.rundir.path, **options)
             self.rundir.event(role, ok=result.ok, error_kind=result.error_kind, session_id=result.session_id,
                               usage=result.usage, rate_limit=result.rate_limit)
             self._persist_router_state()
@@ -448,14 +516,14 @@ class Runner:
 
     # decisions
 
-    def _raise_decision(self, kind: str, decision: Decision, payload: dict) -> None:
+    def _raise_decision(self, kind: str, decision: Decision, payload: dict, state: RunState = RunState.AWAITING_HUMAN) -> None:
         """Record the decision and park the run in the `await` phase. Does not block; `_await` does."""
         self.store.add_decision(decision)
         self.rundir.event("decision", decision_id=decision.decision_id, source=decision.source, decision_type=decision.decision_type,
                           question=decision.question, options=decision.options, kind=kind)
         self.cp.pending_decision = {"decision_id": decision.decision_id, "kind": kind, "payload": payload}
         self.cp.phase = "await"
-        self._transition(RunState.AWAITING_HUMAN, decision_id=decision.decision_id)
+        self._transition(state, decision_id=decision.decision_id)
 
     def _await(self) -> None:
         pending = self.cp.pending_decision
@@ -482,7 +550,15 @@ class Runner:
 
     def _apply_answer(self, kind: str, payload: dict, answer: str) -> None:
         a = answer.strip().lower()
-        if kind in ("implementer", "reviewer"):
+        if kind == "planner":
+            self._set_phase("plan")  # the answer is in DECISIONS.md; plan again
+        elif kind == "plan_approval":
+            if a == "approve":
+                self._next_iteration()
+            else:
+                self.cp.plan_feedback = answer if a != "revise" else "Revise the plan."
+                self._set_phase("plan")
+        elif kind in ("implementer", "reviewer"):
             # The question ended the iteration; the answer sits in DECISIONS.md for both sides.
             self.cp.outcome = {"next_prompt": "Continue with the owner's answer above.", "milestone": self.cp.outcome.get("milestone"), "done": False}
             if self.cp.denied_actions:

@@ -24,6 +24,8 @@ def main() -> int:
         json.dump(record, handle)
 
     scenario = os.environ.get("FAKE_CODEX_SCENARIO") or os.environ.get("FAKE_SCENARIO", "ok")
+    if "--output-schema" in argv and argv[argv.index("--output-schema") + 1].endswith("plan.schema.json") and scenario in ("ok", "done"):
+        scenario = "plan"  # the orchestrator asked for a plan; answer by contract, whatever the review scenario is
     if scenario == "done":
         REVIEW.update(status="done", next_prompt=None)
         scenario = "ok"

@@ -285,3 +285,19 @@ def test_answer_maps_option_index(home: OrqPaths) -> None:
                                 question="Approve?", options=["Approve it (Recommended)", "Leave as-is"]))
     assert CliRunner().invoke(app, ["answer", "DBBBB", "1"]).exit_code == 0
     assert Store(home.db).get_decision("DBBBB").answer == "Leave as-is"
+
+
+def test_status_shows_milestone_and_pr(home: OrqPaths) -> None:
+    from orq.core.checkpoint import Checkpoint
+    store, rundir = seeded_run(home, state="IMPLEMENTING", phase="implement")
+    cp = Checkpoint.load(rundir.path / "state.json")
+    cp.plan = {"summary": "s", "milestones": [{"title": "write it", "goal": "g", "done_when": "d", "difficulty": "hard"},
+                                              {"title": "test it", "goal": "g", "done_when": "d", "difficulty": "mechanical"}]}
+    cp.milestone_index = 1
+    cp.pr_url = "https://github.com/o/r/pull/9"
+    cp.save(rundir.path / "state.json")
+
+    result = CliRunner().invoke(app, ["status", "RAAAAA"])
+
+    assert result.exit_code == 0, result.output
+    assert "milestone 2/2: test it [mechanical]" in result.output and "pull/9" in result.output

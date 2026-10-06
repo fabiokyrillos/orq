@@ -39,9 +39,11 @@ class FakeImplementer:
     name: str = "fake-implementer"
     prompts: list[str] = field(default_factory=list)
     calls: int = 0
+    models: list = field(default_factory=list)
 
     async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         self.prompts.append(prompt)
+        self.models.append(kwargs.get("model"))
         self.calls += 1
         (cwd / f"greeting{self.calls}.txt").write_text("hello\n", encoding="utf-8")
         log_path.write_text('{"type":"result"}\n', encoding="utf-8")
@@ -59,6 +61,26 @@ class FakeReviewer:
 
     async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         self.prompts.append(prompt)
+        log_path.write_text("{}\n", encoding="utf-8")
+        return self.outputs.pop(0)
+
+
+def plan(*milestones: tuple[str, str], status: str = "plan", human: dict | None = None) -> AgentResult:
+    """FakePlanner result: milestones are (title, difficulty) pairs."""
+    items = [{"title": t, "goal": f"goal of {t}", "done_when": f"{t} is in place", "difficulty": d} for t, d in milestones]
+    return AgentResult(ok=True, structured={"status": status, "summary": "the plan", "milestones": items, "human": human}, session_id="p1")
+
+
+@dataclass
+class FakePlanner:
+    outputs: list[AgentResult]
+    name: str = "fake-planner"
+    prompts: list[str] = field(default_factory=list)
+    calls: list[dict] = field(default_factory=list)
+
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
+        self.prompts.append(prompt)
+        self.calls.append(kwargs)
         log_path.write_text("{}\n", encoding="utf-8")
         return self.outputs.pop(0)
 
@@ -94,16 +116,18 @@ def env(tmp_path: Path, origin: Path):
             raise GitError("no pull requests found")
         return "https://github.com/owner/sandbox/pull/1\n"
 
-    def make(implementer, reviewer, scanner=None, human=lambda d: "0", task_text=TASK, resume=None):
+    def make(implementer, reviewer, scanner=None, human=lambda d: "0", task_text=TASK, resume=None, planner=None):
         """human=None means headless: a decision stops the process instead of prompting."""
         store = Store(paths.db)
+        planner = planner or FakePlanner([plan(("the whole task", "hard"))])
         if resume:
             return Runner.resume(run_id=resume, config=config, paths=paths, store=store, git=GitManager(gh=fake_gh),
-                                 implementer=implementer, reviewer=reviewer, scanner=scanner or clean_scanner(), human=human)
+                                 implementer=implementer, reviewer=reviewer, scanner=scanner or clean_scanner(), human=human,
+                                 planner=planner)
         return Runner(
             config=config, paths=paths, store=store, task=parse_task(task_text), task_text=task_text,
             git=GitManager(gh=fake_gh), implementer=implementer, reviewer=reviewer,
-            scanner=scanner or clean_scanner(), human=human, clone_url=str(origin),
+            scanner=scanner or clean_scanner(), human=human, clone_url=str(origin), planner=planner,
         )
 
     return make, paths, pr_calls
@@ -429,9 +453,11 @@ def test_no_progress_asks_and_rollback_discards_iterations(env) -> None:
 def test_no_progress_continue_resets_streak(env) -> None:
     make, paths, _ = env
     asked: list[Decision] = []
-    implementer = SameDiffImplementer([ok(), ok(), ok()])
-    reviewer = FakeReviewer([review("continue", "add the tests"), review("continue", "fix the docs"), review("done", None)])
+    implementer = SameDiffImplementer([ok(), ok(), ok(), ok()])
+    reviewer = FakeReviewer([review("continue", "add the tests"), review("continue", "fix the docs"),
+                             review("continue", "polish the names"), review("done", None)])
     runner = make(implementer, reviewer, human=lambda d: asked.append(d) or "continue")
+    runner.config.limits.max_iterations = 4
 
     assert asyncio.run(runner.execute()) is RunState.DONE
     assert len([d for d in asked if d.decision_type == "blocked"]) == 1
@@ -548,3 +574,111 @@ def test_reviewer_question_in_a_turn_with_denials_still_asks_the_guard(env) -> N
     from orq.guard.rules import action_key
     assert (paths.allow_tokens(runner.run_id) / action_key("Bash", {"command": "rm -rf legacy"})).exists()
     assert "approved this action" in implementer.prompts[1] and "Approve the deletion?" in implementer.prompts[1]
+
+
+# Phase 3: planner, milestones, model routing
+
+
+def test_planning_runs_first_and_milestones_drive_prompts_and_models(env) -> None:
+    make, paths, _ = env
+    planner = FakePlanner([plan(("write greet.py", "hard"), ("add tests", "mechanical"))])
+    implementer = FakeImplementer([ok(), ok()])
+    reviewer = FakeReviewer([review("done", None), review("done", None)])
+    runner = make(implementer, reviewer, planner=planner)
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    assert states(paths, runner.run_id)[:3] == ["QUEUED", "PLANNING", "IMPLEMENTING"]
+    assert planner.calls[0]["effort"] == "high" and planner.calls[0]["contract"].name == "plan"
+    assert "write greet.py" in (paths.run_dir(runner.run_id) / "PLAN.md").read_text(encoding="utf-8")
+    assert "Current milestone (1/2): write greet.py" in implementer.prompts[0]
+    assert "Current milestone (2/2): add tests" in implementer.prompts[1] and "Start milestone 2" in implementer.prompts[1]
+    assert implementer.models == ["opus", "sonnet"]
+    assert "Current milestone (1/2)" in reviewer.prompts[0] and "Current milestone (2/2)" in reviewer.prompts[1]
+    events = [json.loads(l) for l in (paths.run_dir(runner.run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [e["model"] for e in events if e["type"] == "implementer_model"] == ["opus", "sonnet"]
+    assert any(e["type"] == "milestone_done" and e["milestone"] == 1 for e in events)
+    assert runner.store.get_run(runner.run_id).iteration == 2
+
+
+def test_plan_approval_required_pauses_and_free_text_replans(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    answers = iter(["make it one milestone", "approve"])
+    planner = FakePlanner([plan(("a", "hard"), ("b", "hard")), plan(("a and b", "hard"))])
+    implementer = FakeImplementer([ok()])
+    runner = make(implementer, FakeReviewer([review("done", None)]), planner=planner,
+                  human=lambda d: asked.append(d) or next(answers), task_text=TASK.replace("skip", "required"))
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    assert "AWAITING_PLAN_APPROVAL" in states(paths, runner.run_id)
+    assert [d.source for d in asked] == ["planner", "planner"] and asked[0].options == ["approve", "revise"]
+    assert "make it one milestone" in planner.prompts[1] and "revised plan" in planner.prompts[1]
+    assert "Current milestone (1/1): a and b" in implementer.prompts[0]
+    assert "a and b" in (paths.run_dir(runner.run_id) / "PLAN.md").read_text(encoding="utf-8")
+
+
+def test_plan_approval_required_headless_stops_then_resumes(env) -> None:
+    make, paths, _ = env
+    planner = FakePlanner([plan(("a", "hard"))])
+    implementer = FakeImplementer([ok()])
+    runner = make(implementer, FakeReviewer([review("done", None)]), planner=planner, human=None, task_text=TASK.replace("skip", "required"))
+
+    assert asyncio.run(runner.execute()) is RunState.AWAITING_PLAN_APPROVAL
+    assert runner.store.get_run(runner.run_id).state is RunState.AWAITING_PLAN_APPROVAL
+    pending = runner.store.pending_decisions(runner.run_id)[0]
+    runner.store.answer_decision(pending.decision_id, answer="approve", answered_via="cli")
+
+    resumed = make(implementer, FakeReviewer([review("done", None)]), planner=FakePlanner([]), human=None, resume=runner.run_id)
+    assert asyncio.run(resumed.execute()) is RunState.DONE
+
+
+def test_planner_needs_human_asks_then_replans(env) -> None:
+    make, paths, _ = env
+    human_obj = {"decision_type": "ambiguity", "question": "Which greeting?", "options": ["Hello", "Hi"], "recommendation": 0}
+    planner = FakePlanner([plan(status="needs_human", human=human_obj), plan(("greet", "hard"))])
+    asked: list[Decision] = []
+    runner = make(FakeImplementer([ok()]), FakeReviewer([review("done", None)]), planner=planner, human=lambda d: asked.append(d) or "1")
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert asked[0].question == "Which greeting?" and asked[0].source == "planner"
+    assert "Which greeting?" in planner.prompts[1] and "Hi" in planner.prompts[1]
+
+
+def test_planner_invalid_output_twice_fails(env) -> None:
+    make, paths, _ = env
+    bad = AgentResult(ok=False, error="not a plan", error_kind="invalid_output")
+    runner = make(FakeImplementer([]), FakeReviewer([]), planner=FakePlanner([bad, bad]))
+    assert asyncio.run(runner.execute()) is RunState.FAILED
+
+
+def test_reviewer_gets_routine_effort(env) -> None:
+    make, paths, _ = env
+    reviewer = FakeReviewer([review("done", None)])
+    seen: list[dict] = []
+    original = reviewer.run
+
+    async def spy(prompt, **kwargs):
+        seen.append(kwargs)
+        return await original(prompt, **kwargs)
+
+    reviewer.run = spy  # type: ignore[method-assign]
+    runner = make(FakeImplementer([ok()]), reviewer)
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert seen[0]["effort"] == "low" and seen[0]["contract"].name == "review"
+
+
+def test_done_milestones_with_empty_diffs_are_not_a_stall(env) -> None:
+    make, paths, _ = env
+    planner = FakePlanner([plan(("a", "mechanical"), ("b", "mechanical"), ("c", "mechanical"))])
+    implementer = NoWriteImplementer([ok(), ok(), ok()])  # never changes anything
+    implementer.results = [ok(), ok(), ok()]
+    asked: list[Decision] = []
+    reviewer = FakeReviewer([review("done", None)] * 3)
+    runner = make(implementer, reviewer, planner=planner, human=lambda d: asked.append(d) or "abort")
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert asked == []

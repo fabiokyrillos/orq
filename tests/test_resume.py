@@ -11,7 +11,7 @@ from orq.core.loop import ResumeError
 from orq.core.models import RunState
 from orq.paths import OrqPaths
 from tests.conftest import git
-from tests.test_loop import FakeImplementer, FakeReviewer, denied, env, ok, review  # noqa: F401 - env fixture
+from tests.test_loop import FakeImplementer, FakePlanner, FakeReviewer, denied, env, ok, plan, review  # noqa: F401 - env fixture
 
 pytestmark = pytest.mark.usefixtures("origin")
 
@@ -189,3 +189,26 @@ def test_rollback_cli_resets_and_prepares_resume(env) -> None:
     assert not (Path(cp.worktree) / "greeting3.txt").exists() and (Path(cp.worktree) / "greeting1.txt").exists()
     with pytest.raises(ValueError, match="--to"):
         stopped.rollback_cli(5)
+
+
+class CrashingPlanner(FakePlanner):
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
+        if not self.prompts:
+            self.prompts.append(prompt)
+            raise Crash("killed")
+        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event, **kwargs)
+
+
+def test_crash_during_planning_resumes_the_plan_phase(env) -> None:
+    make, paths, _ = env
+    planner = CrashingPlanner([plan(("a", "hard"))])
+    implementer = FakeImplementer([ok()])
+    runner = make(implementer, FakeReviewer([review("done", None)]), planner=planner)
+    with pytest.raises(Crash):
+        asyncio.run(runner.execute())
+    assert Checkpoint.load(state_file(paths, runner.run_id)).phase == "plan"
+
+    resumed = make(implementer, FakeReviewer([review("done", None)]), planner=planner, resume=runner.run_id)
+
+    assert asyncio.run(resumed.execute()) is RunState.DONE
+    assert len(planner.prompts) == 2 and Checkpoint.load(state_file(paths, runner.run_id)).plan["milestones"][0]["title"] == "a"
