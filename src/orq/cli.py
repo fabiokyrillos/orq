@@ -152,7 +152,9 @@ def answer(
     if decision.status != "pending":
         typer.secho(f"{decision_id} already answered: {decision.answer}", fg=typer.colors.RED)
         raise typer.Exit(1)
-    value = "approve" if approve else "deny" if deny else str(text)
+    value = "approve" if approve else "deny" if deny else str(text).strip()
+    if value.isdigit() and decision.options and 0 <= int(value) < len(decision.options):
+        value = decision.options[int(value)]  # same shorthand as the terminal prompt
     store.answer_decision(decision_id, answer=value, answered_via="cli")
     rundir = RunDir(paths.run_dir(decision.run_id))
     rundir.append_decision(decision_id, decision.question, value)

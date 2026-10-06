@@ -277,3 +277,11 @@ def test_run_no_prompt_stops_at_decision_and_resume_continues(home: OrqPaths, or
 
     assert resumed.exit_code == 0, resumed.output
     assert Store(home.db).get_run(run.run_id).state is RunState.DONE
+
+
+def test_answer_maps_option_index(home: OrqPaths) -> None:
+    store, _ = seeded_run(home)
+    store.add_decision(Decision(decision_id="DBBBB", run_id="RAAAAA", source="reviewer", decision_type="blocked",
+                                question="Approve?", options=["Approve it (Recommended)", "Leave as-is"]))
+    assert CliRunner().invoke(app, ["answer", "DBBBB", "1"]).exit_code == 0
+    assert Store(home.db).get_decision("DBBBB").answer == "Leave as-is"

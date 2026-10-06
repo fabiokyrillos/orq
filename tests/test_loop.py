@@ -526,3 +526,25 @@ def test_router_fallback_state_roundtrips_through_checkpoint(env) -> None:
     cp.save(paths.run_dir(runner.run_id) / "state.json")
     resumed = make(FakeImplementer([]), fresh, resume=runner.run_id)
     assert fresh.fallback_until == 4600.0 and resumed.cp.reviewer_fallback_until == 4600.0
+
+
+def test_reviewer_question_in_a_turn_with_denials_still_asks_the_guard(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+
+    def human(decision: Decision) -> str:
+        asked.append(decision)
+        return "approve" if decision.source == "guard" else "0"
+
+    human_obj = {"decision_type": "blocked", "question": "Approve the deletion?", "options": ["yes", "no"], "recommendation": 0}
+    implementer = FakeImplementer([denied("rm -rf legacy"), ok()])
+    reviewer = FakeReviewer([review("needs_human", None, human=human_obj), review("done", None)])
+    runner = make(implementer, reviewer, human=human)
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    assert [d.source for d in asked] == ["reviewer", "guard"]
+    from orq.guard.rules import action_key
+    assert (paths.allow_tokens(runner.run_id) / action_key("Bash", {"command": "rm -rf legacy"})).exists()
+    assert "approved this action" in implementer.prompts[1] and "Approve the deletion?" in implementer.prompts[1]

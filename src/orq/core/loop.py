@@ -482,7 +482,11 @@ class Runner:
         if kind in ("implementer", "reviewer"):
             # The question ended the iteration; the answer sits in DECISIONS.md for both sides.
             self.cp.outcome = {"next_prompt": "Continue with the owner's answer above.", "milestone": self.cp.outcome.get("milestone"), "done": False}
-            self._next_iteration()
+            if self.cp.denied_actions:
+                # Guard denials from the same turn still need their own approve/deny (seen in the Phase 2 sandbox run).
+                self._start_guard_decisions()
+            else:
+                self._next_iteration()
         elif kind == "guard_pre":
             action = payload["action"]
             if a == "approve":
