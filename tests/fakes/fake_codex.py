@@ -41,6 +41,11 @@ def main() -> int:
         err = {"type": "error", "error": {"type": "invalid_request_error", "code": "invalid_json_schema", "message": "Invalid schema"}, "status": 400}
         lines += [{"type": "error", "message": json.dumps(err)}, {"type": "turn.failed", "error": {"message": json.dumps(err)}}]
         code = 1
+    elif scenario == "rate_limit":
+        # Shape from Phase 0 section 5: a generic error event, then turn.failed, exit 1. Message text is still unverified.
+        msg = "You've reached your usage limit. Try again at 10pm."
+        lines += [{"type": "error", "message": msg}, {"type": "turn.failed", "error": {"message": msg}}]
+        code = 1
     elif scenario == "bad_output":
         lines += [message("I forgot the schema", "item_0"), {"type": "turn.completed", "usage": {}}]
     for line in lines:

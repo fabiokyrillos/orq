@@ -502,3 +502,27 @@ def test_agent_error_abort(env) -> None:
     implementer = FakeImplementer([AgentResult(ok=False, error="boom", error_kind="error")])
     runner = make(implementer, FakeReviewer([]), human=lambda d: "abort")
     assert asyncio.run(runner.execute()) is RunState.ABORTED
+
+
+def test_router_fallback_state_roundtrips_through_checkpoint(env) -> None:
+    make, paths, _ = env
+    from orq.adapters.router import ReviewerRouter
+    from orq.core.checkpoint import Checkpoint
+    primary = FakeReviewer([AgentResult(ok=False, error="usage limit", error_kind="rate_limit")])
+    fallback = FakeReviewer([review("done", None)])
+    router = ReviewerRouter(primary, fallback, switch_at_used_percent=90, clock=lambda: 1000.0)
+    runner = make(FakeImplementer([ok()]), router)
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+
+    cp = Checkpoint.load(paths.run_dir(runner.run_id) / "state.json")
+    assert cp.reviewer_fallback_until == 1000.0 + 3600.0
+    types = [json.loads(l)["type"] for l in (paths.run_dir(runner.run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert "reviewer_switched" in types
+
+    # A resumed runner hands the recorded choice back to a fresh router.
+    fresh = ReviewerRouter(FakeReviewer([]), FakeReviewer([]), switch_at_used_percent=90, clock=lambda: 1000.0)
+    cp.state, cp.phase = RunState.PAUSED.value, "finalize"
+    cp.save(paths.run_dir(runner.run_id) / "state.json")
+    resumed = make(FakeImplementer([]), fresh, resume=runner.run_id)
+    assert fresh.fallback_until == 4600.0 and resumed.cp.reviewer_fallback_until == 4600.0

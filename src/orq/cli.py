@@ -12,6 +12,7 @@ import typer
 from orq import __version__
 from orq.adapters.claude import ClaudeImplementer, ClaudeReviewer
 from orq.adapters.codex import CodexReviewer
+from orq.adapters.router import ReviewerRouter
 from orq.config import Config, load_config
 from orq.core.checkpoint import Checkpoint
 from orq.core.loop import PAUSE_FLAG, ResumeError, Runner, SandboxError, implementer_system_prompt
@@ -53,8 +54,13 @@ def _ask_in_terminal(decision: Decision) -> str:
 def _build_reviewer(config: Config):
     if config.reviewer.primary == "claude":
         return ClaudeReviewer(model=config.implementer.default_model)
-    return CodexReviewer(model=config.reviewer.codex_model, effort=config.reviewer.routine_effort,
-                         ignore_user_config=config.reviewer.codex_ignore_user_config)
+    codex = CodexReviewer(model=config.reviewer.codex_model, effort=config.reviewer.routine_effort,
+                          ignore_user_config=config.reviewer.codex_ignore_user_config)
+    if config.reviewer.fallback != "claude":
+        return codex
+    # Codex usage limit -> Claude reviewer until the limit resets (SPEC 12).
+    return ReviewerRouter(codex, ClaudeReviewer(model=config.implementer.default_model),
+                          switch_at_used_percent=config.reviewer.switch_at_used_percent)
 
 
 def _runner_parts(config: Config) -> dict:

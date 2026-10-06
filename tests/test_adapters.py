@@ -262,3 +262,65 @@ def test_validate_review_needs_human_requires_human_object() -> None:
     problems = validate_review({"status": "needs_human", "summary": "s", "milestone": "m", "next_prompt": None, "issues": [], "human": None})
 
     assert any("human" in p for p in problems)
+
+
+def write_session_file(root: Path, thread_id: str, snapshots: list[dict]) -> None:
+    day = root / "2026" / "10" / "06"
+    day.mkdir(parents=True, exist_ok=True)
+    lines = [{"timestamp": "t", "ordinal": i, "type": "event_msg",
+              "payload": {"type": "token_count", "info": None, "rate_limits": snap}} for i, snap in enumerate(snapshots)]
+    lines.insert(0, {"timestamp": "t", "type": "session_meta", "payload": {"id": thread_id}})
+    (day / f"rollout-2026-10-06T10-00-00-{thread_id}.jsonl").write_text(
+        "\n".join(json.dumps(l) for l in lines) + "\n", encoding="utf-8")
+
+
+def test_codex_reads_latest_rate_limit_snapshot_from_session_file(tmp_path: Path) -> None:
+    from orq.adapters.codex import read_rate_limits
+    write_session_file(tmp_path / "sessions", "thread-1", [
+        {"primary": {"used_percent": 16.0, "resets_at": 1791238480}, "rate_limit_reached_type": None},
+        {"primary": {"used_percent": 91.0, "resets_at": 1791238480}, "rate_limit_reached_type": None},
+    ])
+    snapshot = read_rate_limits("thread-1", sessions_root=tmp_path / "sessions")
+    assert snapshot["primary"]["used_percent"] == 91.0
+    assert read_rate_limits("missing", sessions_root=tmp_path / "sessions") is None
+    assert read_rate_limits(None, sessions_root=tmp_path / "sessions") is None
+    assert read_rate_limits("thread-1", sessions_root=tmp_path / "nowhere") is None
+
+
+def test_codex_attaches_snapshot_to_result(record, tmp_path, monkeypatch) -> None:
+    scenario(monkeypatch, "ok")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    write_session_file(tmp_path / "codex-home" / "sessions", "thread-1", [{"primary": {"used_percent": 42.0, "resets_at": 1}}])
+
+    result = run(codex(), "review it", tmp_path)
+
+    assert result.ok and result.rate_limit == {"primary": {"used_percent": 42.0, "resets_at": 1}}
+
+
+def test_codex_rate_limit_failure_is_classified(record, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "rate_limit")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+    result = run(codex(), "review it", tmp_path)
+
+    assert not result.ok and result.error_kind == "rate_limit" and "usage limit" in result.error
+
+
+def test_codex_snapshot_reached_type_marks_rate_limit(record, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "schema_error")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    write_session_file(tmp_path / "codex-home" / "sessions", "thread-1",
+                       [{"primary": {"used_percent": 100.0, "resets_at": 1}, "rate_limit_reached_type": "primary"}])
+
+    result = run(codex(), "review it", tmp_path)
+
+    assert not result.ok and result.error_kind == "rate_limit"
+
+
+def test_classify_codex_error() -> None:
+    from orq.adapters.codex import classify_codex_error
+    assert classify_codex_error("You've reached your usage limit", None) == "rate_limit"
+    assert classify_codex_error("429 Too Many Requests", None) == "rate_limit"
+    assert classify_codex_error("Not logged in. Run codex login", None) == "auth"
+    assert classify_codex_error("Invalid schema", None) == "error"
+    assert classify_codex_error("Invalid schema", {"rate_limit_reached_type": "primary"}) == "rate_limit"

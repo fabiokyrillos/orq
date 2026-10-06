@@ -4,11 +4,58 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
 from orq.adapters.base import AgentResult, EventCallback, clean_env, split_command, stream_process
 from orq.adapters.schema import REVIEW_SCHEMA, validate_review
+
+_LIMIT_RE = re.compile(r"usage limit|rate limit|quota|too many requests|\b429\b", re.IGNORECASE)
+_AUTH_RE = re.compile(r"unauthori[sz]ed|not logged in|codex login|\b401\b", re.IGNORECASE)
+
+
+def sessions_root() -> Path:
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"
+
+
+def read_rate_limits(thread_id: str | None, sessions_root: Path | None = None) -> dict | None:
+    """Latest `rate_limits` snapshot from the Codex session file of `thread_id`, or None (Phase 0 section 5).
+
+    Files live at <sessions>/<yyyy>/<mm>/<dd>/rollout-<ts>-<thread_id>[_<sub>].jsonl; every `token_count`
+    event carries the snapshot under `payload.rate_limits`. This is not in the `--json` stdout stream.
+    """
+    if not thread_id:
+        return None
+    root = sessions_root if sessions_root is not None else globals()["sessions_root"]()
+    if not root.exists():
+        return None
+    matches = sorted(root.glob(f"*/*/*/rollout-*{thread_id}*.jsonl"))
+    if not matches:
+        return None
+    latest: dict | None = None
+    with matches[-1].open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if '"rate_limits"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else event
+            if isinstance(payload.get("rate_limits"), dict):
+                latest = payload["rate_limits"]
+    return latest
+
+
+def classify_codex_error(message: str, snapshot: dict | None) -> str:
+    if snapshot and snapshot.get("rate_limit_reached_type"):
+        return "rate_limit"
+    if _LIMIT_RE.search(message or ""):
+        return "rate_limit"
+    if _AUTH_RE.search(message or ""):
+        return "auth"
+    return "error"
 
 
 def codex_argv() -> list[str]:
@@ -32,6 +79,7 @@ class CodexReviewer:
         self.effort = effort
         self.ignore_user_config = ignore_user_config
         self._prefix = argv_prefix
+        self.last_rate_limits: dict | None = None
 
     async def run(self, prompt: str, *, cwd: Path, log_path: Path, session_id: str | None = None,
                   run_dir: Path | None = None, on_event: EventCallback | None = None) -> AgentResult:
@@ -54,9 +102,11 @@ class CodexReviewer:
         thread_id = next((e.get("thread_id") for e in completed.events if e.get("type") == "thread.started"), None)
         usage = next((e.get("usage") or {} for e in completed.events if e.get("type") == "turn.completed"), {})
         failure = next((e for e in completed.events if e.get("type") in ("error", "turn.failed")), None)
+        self.last_rate_limits = read_rate_limits(thread_id)
         if failure or completed.exit_code != 0:
             message = (failure or {}).get("message") or ((failure or {}).get("error") or {}).get("message") or completed.stderr.strip()
-            return AgentResult(ok=False, session_id=thread_id, error=message, error_kind="error", usage=usage, exit_code=completed.exit_code)
+            return AgentResult(ok=False, session_id=thread_id, error=message, error_kind=classify_codex_error(message, self.last_rate_limits),
+                               usage=usage, rate_limit=self.last_rate_limits, exit_code=completed.exit_code)
 
         # Every agent_message is schema-shaped, including progress notes; only the last one is the review.
         messages = [e["item"].get("text", "") for e in completed.events
@@ -69,5 +119,6 @@ class CodexReviewer:
         problems = validate_review(structured)
         if problems:
             return AgentResult(ok=False, text=text, session_id=thread_id, error="; ".join(problems),
-                               error_kind="invalid_output", usage=usage, exit_code=completed.exit_code)
-        return AgentResult(ok=True, text=text, session_id=thread_id, structured=structured, usage=usage, exit_code=completed.exit_code)
+                               error_kind="invalid_output", usage=usage, rate_limit=self.last_rate_limits, exit_code=completed.exit_code)
+        return AgentResult(ok=True, text=text, session_id=thread_id, structured=structured, usage=usage,
+                           rate_limit=self.last_rate_limits, exit_code=completed.exit_code)
