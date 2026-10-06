@@ -95,6 +95,7 @@ def _checkpoint_or_exit(run_id: str) -> tuple[OrqPaths, Checkpoint]:
 def run(
     task_file: Path = typer.Argument(..., exists=True, readable=True, help="Path to TASK.md"),
     clone_url: str | None = typer.Option(None, "--clone-url", hidden=True, help="Override the clone URL (tests)."),
+    no_prompt: bool = typer.Option(False, "--no-prompt", help="Headless: stop at the first decision instead of asking in the terminal."),
 ) -> None:
     """Run a task from TASK.md until a PR is open or the owner is needed."""
     paths = OrqPaths.from_env()
@@ -106,8 +107,8 @@ def run(
         typer.secho(f"TASK.md invalid: {exc}", fg=typer.colors.RED)
         raise typer.Exit(1)
     try:
-        runner = Runner(config=config, paths=paths, store=Store(paths.db), task=task, task_text=task_text, human=_ask_in_terminal,
-                        clone_url=clone_url, printer=typer.echo, **_runner_parts(config))
+        runner = Runner(config=config, paths=paths, store=Store(paths.db), task=task, task_text=task_text,
+                        human=None if no_prompt else _ask_in_terminal, clone_url=clone_url, printer=typer.echo, **_runner_parts(config))
     except SandboxError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1)
@@ -119,9 +120,12 @@ def run(
 
 
 @app.command()
-def resume(run_id: str) -> None:
+def resume(
+    run_id: str,
+    no_prompt: bool = typer.Option(False, "--no-prompt", help="Headless: stop at the next decision instead of asking in the terminal."),
+) -> None:
     """Continue a paused, crashed or answered run from its last checkpoint."""
-    runner = _resume_runner(run_id, human=_ask_in_terminal)
+    runner = _resume_runner(run_id, human=None if no_prompt else _ask_in_terminal)
     typer.echo(f"resuming {run_id} at phase {runner.cp.phase}, iteration {runner.cp.iteration}")
     final = asyncio.run(runner.execute())
     if final is not RunState.DONE:

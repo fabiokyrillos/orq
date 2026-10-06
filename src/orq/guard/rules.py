@@ -38,8 +38,18 @@ class Violation:
 
 
 def action_key(tool_name: str, tool_input: dict) -> str:
-    """Stable key for one exact action; the allow token file is named after it."""
-    payload = tool_name + "\n" + json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
+    """Stable key for one exact action; the allow token file is named after it.
+
+    Only the semantic part of the input counts: Claude adds a free-text `description` next to a Bash
+    `command`, and it changes between the denied attempt and the approved retry (seen in Phase 2).
+    """
+    if tool_name == "Bash":
+        essence: object = str(tool_input.get("command", "")).strip()
+    elif tool_name in FILE_TOOLS:
+        essence = str(tool_input.get(FILE_TOOLS[tool_name], "")).strip()
+    else:
+        essence = tool_input
+    payload = tool_name + "\n" + json.dumps(essence, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 

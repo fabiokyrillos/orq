@@ -81,10 +81,12 @@ def test_other_tools_are_allowed() -> None:
 
 
 def test_action_key_is_stable_and_input_sensitive() -> None:
-    a = action_key("Bash", {"command": "git reset --hard", "description": "x"})
-    b = action_key("Bash", {"description": "x", "command": "git reset --hard"})
+    a = action_key("Bash", {"command": "git reset --hard", "description": "Reset working tree"})
+    b = action_key("Bash", {"description": "Discard changes", "command": "git reset --hard"})
     c = action_key("Bash", {"command": "git reset --hard HEAD~2"})
-    assert a == b and a != c and len(a) == 24
+    assert a == b and a != c and len(a) == 24  # the description Claude adds does not change the key
+    assert action_key("Write", {"file_path": "x.py", "content": "a"}) == action_key("Write", {"file_path": "x.py", "content": "b"})
+    assert action_key("Write", {"file_path": "x.py"}) != action_key("Edit", {"file_path": "x.py"})
 
 
 def test_describe_action_quotes_command_or_path() -> None:

@@ -90,10 +90,15 @@ QUEUED → PLANNING → AWAITING_PLAN_APPROVAL (optional) → IMPLEMENTING
        → VERIFYING → REVIEWING → (back to IMPLEMENTING, or)
        → FINALIZING (PR, CI, rebase, merge) → DONE
 
-Side states: AWAITING_HUMAN, PAUSED_RATE_LIMIT, FAILED, ABORTED
+Side states: AWAITING_HUMAN, PAUSED_RATE_LIMIT, PAUSED, FAILED, ABORTED
 ```
 
-Every transition is written to `events.jsonl` and to SQLite before it takes effect, so a crash can resume from the last state.
+Every transition is written to `events.jsonl` and to SQLite before it takes effect. `state.json` in the run dir is the checkpoint: it records the phase inside the iteration (`setup`, `implement`, `verify`, `review`, `await`, `finalize`, `done`), the pending decision and everything the next step needs. `orq resume <run_id>` rebuilds the run from it and continues through the same code path as a live run (Phase 2):
+
+* A crash during an implementer turn keeps the uncommitted work; the same session is re-invoked with an "interrupted turn" note. The orphaned CLI child (pid kept in `child.pid`) is killed first.
+* `orq resume` refuses a run whose process is still alive, a `DONE`/`ABORTED` run, and a worktree whose HEAD moved away from the last recorded commit (the one exception is the iteration commit itself, when the crash landed between the commit and the next checkpoint write).
+* `orq pause` drops a `pause.requested` flag; the loop stops between phases with state `PAUSED`.
+* Decisions are answered either in the terminal of the live process or, after a crash or kill, with `orq answer` followed by `orq resume`.
 
 ## 7. One iteration
 
@@ -239,11 +244,20 @@ Pause and ask the owner when any of these fire:
 
 * Same diff hash in 2 consecutive iterations.
 * Same failing check signature in 3 consecutive iterations.
-* `next_prompt` near identical to the previous one (simple text similarity).
+* `next_prompt` near identical to the previous one (`difflib` ratio at or above 0.9).
+
+The decision (`source orq`, type `blocked`) offers `continue` (the streak counter resets), `rollback to iteration <n>` (the last iteration before the streak; `n = 0` means the base commit) and `abort`. A rollback resets the worktree to that iteration's commit, archives the discarded iteration directories, tells both agents what was discarded in their next prompts, and sets the iteration counter back so discarded iterations do not count toward `max_iterations`.
 
 ### 10.3 Guard: pre execution (`PreToolUse` hook, Python)
 
-Denies and records: `git push --force`, `git reset --hard`, branch deletion, recursive deletes, `DROP`/`TRUNCATE`, dependency removal, writes outside the worktree. orq turns the denial into a destructive decision. On `APPROVE`, orq writes a one time allow token for that exact action into the run dir; the hook consumes it on retry.
+Denies and records: `git push --force`, `git reset --hard`, branch deletion, `git clean`, recursive deletes (`rm -r`, `Remove-Item -Recurse`, `rmdir /s`, `del /s`), `DROP TABLE|DATABASE|SCHEMA`/`TRUNCATE TABLE`, dependency removal (`uv remove`, `pip uninstall`, `npm uninstall`, ...), writes outside the worktree (file tools by path, Bash redirections and `tee` to absolute paths), and file tools on `protected_paths`. orq turns the denial into a destructive decision. On `APPROVE`, orq writes a one time allow token for that exact action into the run dir; the hook consumes it on retry.
+
+Implemented in Phase 2 (`src/orq/guard/`):
+
+* The rules are pure functions (`rules.py`); the hook (`hook.py`) only reads stdin, checks the token and logs. A hook crash allows the call and logs the error: the diff rules and the reviewer are the next layers.
+* The action key is `sha256(tool_name + canonical JSON of tool_input)[:24]`; the token is `<run_dir>/allow_tokens/<key>`. The owner approves one exact action; the next prompt quotes the command verbatim so the implementer retries it unchanged.
+* The runner writes `claude-settings.json` (the hook attachment) and `guard.json` (worktree path, protected paths) into the run dir; the implementer adapter adds `--settings` when the file exists. Every hook call appends a line to `<run_dir>/guard.jsonl` (`allow`, `deny`, `allow-by-token`).
+* The deny reason tells the model not to work around the denial and to end its turn stating the exact command it needs. After the turn, orq reads `result.permission_denials`, asks one decision per unique action (`approve`/`deny`), and when the turn produced no changes it skips the check and the review and goes straight to those decisions.
 
 Confirmed in Phase 0:
 
@@ -256,6 +270,8 @@ Confirmed in Phase 0:
 ### 10.4 Guard: post execution (diff rules)
 
 Deleted files, removed tests, removed exported functions or routes, protected paths (configurable per repo), large negative line balance. On `DENY`, the worktree is reset to the last iteration commit and the implementer is told to proceed without that change.
+
+Implemented in Phase 2 (`src/orq/guard/diff_rules.py`), evaluated on the staged index right after the secret scan and before the check command. Rule ids: `deleted_file`, `removed_test`, `removed_export`, `removed_route`, `protected_path`, `dependency_removed` (manifest lines in `pyproject.toml`, `requirements*.txt`, `package.json`, `Cargo.toml`, `go.mod`), `negative_balance` (net deleted source lines above `[guard].max_net_deleted_lines`, default 300, over `[guard].source_globs`). The name-based rules are heuristics: a removed name that reappears anywhere in the added lines (rename, move) does not fire. One decision per iteration lists every violation; the approved list lands in `DECISIONS.md` so the reviewer sees it. On deny the iteration ends without a commit or a review.
 
 ### 10.5 Secrets (repos are public)
 
@@ -305,8 +321,13 @@ Never inside the repo (repos are public):
   runs\<run_id>\
     TASK.md
     DECISIONS.md
-    state.json               # crash recovery
+    state.json               # checkpoint: phase, pending decision, sessions, commits (crash recovery)
     events.jsonl             # every event, timestamped
+    claude-settings.json     # attaches the guard hook (--settings)
+    guard.json               # worktree path and protected paths for the hook
+    guard.jsonl              # every hook decision
+    child.pid                # pid of the running CLI child, removed when it exits
+    pause.requested          # present while an `orq pause` is pending
     iterations\<n>\
       implementer.prompt.md
       implementer.stream.jsonl
@@ -314,6 +335,7 @@ Never inside the repo (repos are public):
       reviewer.output.json
       diff.patch
       checks.txt
+    iterations\<n>.discarded-<ts>\   # archived by a rollback
     allow_tokens\
 ```
 
@@ -323,8 +345,9 @@ Never inside the repo (repos are public):
   * Claude (real occurrences): message `You've hit your session limit · resets 10pm (America/Cayenne)` with `error: "rate_limit"`. The reset is a local clock time plus zone, with no date. A failed `claude -p` call reports `is_error: true` and exit code 1 while `subtype` still says `success`, so adapters test `is_error`. Every `stream-json` run also emits a `rate_limit_event` (`rate_limit_info.status`, `resetsAt`, `rateLimitType`) before `result`; the adapter records it for proactive backoff.
   * Codex: failures arrive as an `error` event followed by `turn.failed` and exit code 1. The session file (`~/.codex/sessions/.../rollout-*-<thread_id>.jsonl`) carries a `rate_limits` snapshot on every `token_count` event (`primary.used_percent`, `primary.resets_at`, `secondary.*`). The adapter reads it after each call and switches to the fallback before the limit is reached (default 90 percent), then back after `resets_at`.
   * An unrecognized error is never retried blindly; it pauses the run for the owner.
-* Codex limit → switch reviewer to the Claude fallback, record it, retry Codex after reset.
-* Claude limit → `PAUSED_RATE_LIMIT`, backoff, notify owner.
+* Codex limit → switch reviewer to the Claude fallback, record it, retry Codex after reset. Phase 2: `ReviewerRouter` wraps both adapters behind the `Agent` interface. The Codex adapter reads the `rate_limits` snapshot from the session file after every call; at or past `switch_at_used_percent` the router routes later reviews to the fallback until `primary.resets_at` (proactive). A Codex failure classified as a limit (snapshot `rate_limit_reached_type` set, or a message matching usage limit / rate limit / quota / 429) switches at once and the same review is retried on the fallback (reactive). Events `reviewer_switched` and `reviewer_restored`; the choice survives a resume through `state.json`.
+* Claude limit → `PAUSED_RATE_LIMIT`, backoff, notify owner. Phase 2: the wait is until the reset time (`resetsAt` from the stream event when it lies in the future, else the `resets <time> (<zone>)` text, else 15 minutes) plus 60 s, then the same phase is retried. After `[limits].rate_limit_retries` (default 3) waits inside one iteration the owner is asked (`retry`/`abort`). The owner may kill the process during the wait; `orq resume` honours the recorded reset time.
+* Any other agent failure (`error`, `auth`) is never retried blindly and no longer ends the run as `FAILED`: it raises a `blocked` decision with `retry` and `abort`. `FAILED` is reserved for invariants (invalid reviewer output after a retry, limits exceeded).
 * Keep reviewer prompts lean: the reviewer reads the repo; send only task, milestone, diff summary, check results, implementer final message.
 * Reviewer effort: low for routine iterations, high for planning and the final merge gate.
 * Implementer model per step: planner may tag milestones as `hard` (Opus) or `mechanical` (Sonnet).
@@ -336,6 +359,7 @@ Never inside the repo (repos are public):
 max_iterations = 15
 max_wall_hours = 6
 max_concurrent_runs = 2
+rate_limit_retries = 3
 
 [implementer]
 default_model = "opus"
@@ -353,6 +377,11 @@ final_effort = "high"
 merge_strategy = "squash"
 worktree_root = "~/.orq/worktrees"
 protected_paths = [".github/**", "migrations/**", "**/.env*"]
+sandbox_repos = []          # optional allowlist; empty allows any repo
+
+[guard]
+max_net_deleted_lines = 300
+source_globs = ["**/*.py", "**/*.js", "**/*.ts", "**/*.tsx", "**/*.jsx", "**/*.rs", "**/*.go", "**/*.java", "**/*.cs"]
 
 [notify]
 toast = true

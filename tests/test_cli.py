@@ -248,3 +248,32 @@ def test_run_kill_and_resume_with_fake_clis(home: OrqPaths, origin: Path, tmp_pa
     assert "interrupted" in (home.iteration_dir(run_id, 1) / "implementer.prompt.md").read_text(encoding="utf-8").lower()
     events = [json.loads(l) for l in (home.run_dir(run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert any(e["type"] == "orphan_killed" for e in events) and any(e["type"] == "resume" for e in events)
+
+
+def test_run_no_prompt_stops_at_decision_and_resume_continues(home: OrqPaths, origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home.config.write_text(f'[git]\nworktree_root = "{(tmp_path / "wt").as_posix()}"\n', encoding="utf-8")
+    task = tmp_path / "TASK.md"
+    task.write_text(TASK, encoding="utf-8")
+    py = sys.executable
+    monkeypatch.setenv("ORQ_CLAUDE_EXE", f"{py} {FAKES / 'fake_claude.py'}")
+    monkeypatch.setenv("ORQ_CODEX_CMD", f"{py} {FAKES / 'fake_codex.py'}")
+    monkeypatch.setenv("ORQ_GH_CMD", f"{py} {FAKES / 'fake_gh.py'}")
+    monkeypatch.setenv("FAKE_RECORD", str(tmp_path / "rec.json"))
+    monkeypatch.setenv("FAKE_GH_RECORD", str(tmp_path / "gh.jsonl"))
+    monkeypatch.setenv("FAKE_SCENARIO", "denied")  # the fake reports a denied `git reset --hard`
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "done")
+
+    result = CliRunner().invoke(app, ["run", str(task), "--clone-url", str(origin), "--no-prompt"])
+
+    assert result.exit_code == 1, result.output
+    run = Store(home.db).list_runs()[0]
+    assert run.state is RunState.AWAITING_HUMAN
+    pending = Store(home.db).pending_decisions(run.run_id)
+    assert len(pending) == 1 and pending[0].source == "guard"
+
+    assert CliRunner().invoke(app, ["answer", pending[0].decision_id, "--deny"]).exit_code == 0
+    monkeypatch.setenv("FAKE_SCENARIO", "ok")
+    resumed = CliRunner().invoke(app, ["resume", run.run_id, "--no-prompt"])
+
+    assert resumed.exit_code == 0, resumed.output
+    assert Store(home.db).get_run(run.run_id).state is RunState.DONE
