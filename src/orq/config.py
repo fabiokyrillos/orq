@@ -60,12 +60,26 @@ class GuardConfig:
 
 
 @dataclass
+class MergeConfig:
+    """Merge gate (SPEC 10.7)."""
+
+    poll_seconds: float = 20
+    ci_timeout_minutes: float = 60
+    # No checks at all after this long means the repo has no CI; the owner decides (Phase 3).
+    ci_grace_minutes: float = 5
+    max_ci_reruns: int = 3
+    # Gate restarts (CI failure or final review not done) before the owner is asked.
+    max_gate_rounds: int = 3
+
+
+@dataclass
 class Config:
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     implementer: ImplementerConfig = field(default_factory=ImplementerConfig)
     reviewer: ReviewerConfig = field(default_factory=ReviewerConfig)
     git: GitConfig = field(default_factory=GitConfig)
     guard: GuardConfig = field(default_factory=GuardConfig)
+    merge: MergeConfig = field(default_factory=MergeConfig)
 
 
 def load_config(path: Path) -> Config:

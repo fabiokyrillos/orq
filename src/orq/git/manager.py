@@ -138,6 +138,47 @@ class GitManager:
         parents = out[1].split() if len(out) > 1 else []
         return subject, (parents[0] if parents else "")
 
+    def base_moved(self, worktree: Path, base: str) -> bool:
+        """True when origin/<base> has commits that are not in HEAD (the PR needs a rebase)."""
+        self.git("fetch", "origin", base, cwd=worktree)
+        try:
+            self.git("merge-base", "--is-ancestor", f"origin/{base}", "HEAD", cwd=worktree)
+            return False
+        except GitError:
+            return True
+
+    def rebase_onto_base(self, worktree: Path, base: str) -> bool:
+        """Rebase HEAD onto a freshly fetched origin/<base>; on conflict abort and return False."""
+        self.git("fetch", "origin", base, cwd=worktree)
+        try:
+            self.git("rebase", f"origin/{base}", cwd=worktree)
+            return True
+        except GitError:
+            try:
+                self.git("rebase", "--abort", cwd=worktree)
+            except GitError:
+                pass
+            return False
+
+    def force_push(self, worktree: Path, branch: str) -> None:
+        """orq's own push after a rebase; the implementer never gets to do this (guard rule git_force_push)."""
+        self.git("push", "--force-with-lease", "origin", branch, cwd=worktree)
+
+    def pr_number(self, worktree: Path, head: str) -> int | None:
+        try:
+            out = self._gh(["pr", "view", head, "--json", "number", "-q", ".number"], worktree).strip()
+        except GitError:
+            return None
+        return int(out) if out.isdigit() else None
+
+    def pr_state(self, worktree: Path, number: int) -> str:
+        return self._gh(["pr", "view", str(number), "--json", "state", "-q", ".state"], worktree).strip()
+
+    def merge_pr(self, worktree: Path, number: int, strategy: str = "squash") -> None:
+        if strategy not in ("squash", "merge", "rebase"):
+            raise GitError(f"unknown merge strategy {strategy}")
+        self._gh(["pr", "merge", str(number), f"--{strategy}", "--delete-branch"], worktree)
+
     def pr_url(self, worktree: Path, head: str) -> str | None:
         """URL of the open PR for `head`, or None when there is none (a resumed finalize must not open a second PR)."""
         try:

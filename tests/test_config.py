@@ -60,3 +60,11 @@ def test_worktree_root_expands_user_home(tmp_path: Path) -> None:
 
     assert config.git.worktree_root == Path.home() / "wt"
     assert isinstance(config, Config)
+
+
+def test_merge_section_defaults_and_override(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("[merge]\nci_timeout_minutes = 5\n", encoding="utf-8")
+    config = load_config(path)
+    assert config.merge.ci_timeout_minutes == 5 and config.merge.poll_seconds == 20
+    assert config.merge.ci_grace_minutes == 5 and config.merge.max_ci_reruns == 3 and config.merge.max_gate_rounds == 3

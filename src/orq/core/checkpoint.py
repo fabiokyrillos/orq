@@ -14,7 +14,7 @@ VERSION = 1
 class Checkpoint:
     run_id: str
     state: str
-    phase: str                       # setup | implement | verify | review | await | finalize | done
+    phase: str                       # setup | plan | implement | verify | review | await | finalize | gate_ci | gate_review | gate_merge | done
     branch: str
     worktree: str
     repo_path: str | None = None
@@ -43,6 +43,13 @@ class Checkpoint:
     rate_limit_until: float | None = None
     rate_limit_retries: int = 0
     interrupted: bool = False                                  # the implementer turn was cut by a crash
+    plan: dict | None = None                                   # planner output (SPEC 8.5)
+    milestone_index: int = 0
+    plan_feedback: str | None = None                           # owner's revision request for the planner
+    pr_number: int | None = None
+    pr_url: str | None = None
+    gate_rounds: int = 0                                       # restarts of the merge gate
+    ci_reruns: int = 0
     started_at: str | None = None
     elapsed_seconds: float = 0.0
 

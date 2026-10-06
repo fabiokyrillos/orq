@@ -104,3 +104,82 @@ def test_create_pr_uses_gh_and_returns_url(repo: Path, tmp_path: Path) -> None:
 
     assert url == "https://github.com/owner/sandbox/pull/7"
     assert calls == [["pr", "create", "--base", "main", "--head", "orq/x", "--title", "Add thing", "--body", "body"]]
+
+
+# Phase 3: gate operations
+
+
+def seed_push(origin: Path, tmp_path: Path, name: str, content: str) -> None:
+    seed = tmp_path / "seed"
+    (seed / name).write_text(content, encoding="utf-8")
+    git("add", "-A", cwd=seed)
+    git("commit", "-q", "-m", f"seed {name}", cwd=seed)
+    git("push", "-q", "origin", "main", cwd=seed)
+
+
+def test_base_moved_and_clean_rebase(manager: GitManager, repo: Path, origin: Path, tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    manager.create_worktree(repo, worktree, branch="orq/x", base="main")
+    (worktree / "new.txt").write_text("hello\n", encoding="utf-8")
+    manager.commit_all(worktree, "iter 1")
+    assert manager.base_moved(worktree, "main") is False
+
+    seed_push(origin, tmp_path, "other.txt", "other\n")
+
+    assert manager.base_moved(worktree, "main") is True
+    assert manager.rebase_onto_base(worktree, "main") is True
+    assert (worktree / "other.txt").exists() and (worktree / "new.txt").exists()
+    assert manager.base_moved(worktree, "main") is False
+
+
+def test_conflicting_rebase_is_aborted(manager: GitManager, repo: Path, origin: Path, tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    manager.create_worktree(repo, worktree, branch="orq/x", base="main")
+    (worktree / "README.md").write_text("ours\n", encoding="utf-8")
+    manager.commit_all(worktree, "iter 1")
+    seed_push(origin, tmp_path, "README.md", "theirs\n")
+
+    assert manager.rebase_onto_base(worktree, "main") is False
+    assert (worktree / "README.md").read_text(encoding="utf-8") == "ours\n"
+    assert not (worktree / ".git" / "rebase-merge").exists() and git("status", "--porcelain", cwd=worktree).strip() == ""
+
+
+def test_force_push_updates_remote(manager: GitManager, repo: Path, origin: Path, tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    manager.create_worktree(repo, worktree, branch="orq/x", base="main")
+    (worktree / "new.txt").write_text("hello\n", encoding="utf-8")
+    manager.commit_all(worktree, "iter 1")
+    manager.push(worktree, "orq/x")
+    git("commit", "-q", "--amend", "-m", "iter 1 amended", cwd=worktree)
+
+    manager.force_push(worktree, "orq/x")
+
+    remote = git("ls-remote", "--heads", str(origin), "orq/x", cwd=tmp_path).split()[0]
+    assert remote == manager.head(worktree)
+
+
+def test_pr_number_state_and_merge_via_gh(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def fake_gh(args: list[str], cwd: Path) -> str:
+        calls.append(args)
+        if args[:2] == ["pr", "view"] and "number" in args[-3]:
+            return "12\n"
+        if args[:2] == ["pr", "view"]:
+            return "MERGED\n"
+        return ""
+
+    manager = GitManager(gh=fake_gh)
+    assert manager.pr_number(tmp_path, "orq/x") == 12
+    manager.merge_pr(tmp_path, 12, strategy="squash")
+    assert manager.pr_state(tmp_path, 12) == "MERGED"
+    assert calls[1] == ["pr", "merge", "12", "--squash", "--delete-branch"]
+    with pytest.raises(GitError, match="strategy"):
+        manager.merge_pr(tmp_path, 12, strategy="fast-forward")
+
+
+def test_pr_number_none_when_gh_fails(tmp_path: Path) -> None:
+    def failing(args: list[str], cwd: Path) -> str:
+        raise GitError("no pull requests found")
+
+    assert GitManager(gh=failing).pr_number(tmp_path, "orq/x") is None
