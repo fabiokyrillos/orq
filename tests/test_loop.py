@@ -11,7 +11,7 @@ from orq.config import Config
 from orq.core.loop import Runner, SandboxError
 from orq.core.models import Decision, RunState
 from orq.core.task import parse_task
-from orq.git.manager import GitManager
+from orq.git.manager import GitError, GitManager
 from orq.paths import OrqPaths
 from orq.store.db import Store
 from orq.verify.secrets import SecretScanner
@@ -90,13 +90,20 @@ def env(tmp_path: Path, origin: Path):
 
     def fake_gh(args, cwd):
         pr_calls.append(args)
+        if args[:2] == ["pr", "view"]:
+            raise GitError("no pull requests found")
         return "https://github.com/owner/sandbox/pull/1\n"
 
-    def make(implementer, reviewer, scanner=None, human=None, task_text=TASK):
+    def make(implementer, reviewer, scanner=None, human=lambda d: "0", task_text=TASK, resume=None):
+        """human=None means headless: a decision stops the process instead of prompting."""
+        store = Store(paths.db)
+        if resume:
+            return Runner.resume(run_id=resume, config=config, paths=paths, store=store, git=GitManager(gh=fake_gh),
+                                 implementer=implementer, reviewer=reviewer, scanner=scanner or clean_scanner(), human=human)
         return Runner(
-            config=config, paths=paths, store=Store(paths.db), task=parse_task(task_text), task_text=task_text,
+            config=config, paths=paths, store=store, task=parse_task(task_text), task_text=task_text,
             git=GitManager(gh=fake_gh), implementer=implementer, reviewer=reviewer,
-            scanner=scanner or clean_scanner(), human=human or (lambda d: "0"), clone_url=str(origin),
+            scanner=scanner or clean_scanner(), human=human, clone_url=str(origin),
         )
 
     return make, paths, pr_calls
@@ -117,7 +124,7 @@ def test_happy_path_ends_with_open_pr(env, tmp_path: Path) -> None:
 
     assert final is RunState.DONE
     assert states(paths, runner.run_id)[-3:] == ["REVIEWING", "FINALIZING", "DONE"]
-    assert pr_calls and pr_calls[0][:2] == ["pr", "create"]
+    assert [c[:2] for c in pr_calls] == [["pr", "view"], ["pr", "create"]]
     worktree = runner.worktree
     log = git("log", "--format=%s", cwd=worktree).splitlines()
     assert log[0].startswith(f"orq({runner.run_id}) iter 2:")
@@ -188,16 +195,6 @@ def test_max_iterations_fails_the_run(env) -> None:
     assert runner.store.get_run(runner.run_id).iteration == 3
 
 
-def test_implementer_rate_limit_pauses_run(env) -> None:
-    make, paths, _ = env
-    limited = AgentResult(ok=False, error="You've hit your session limit", error_kind="rate_limit")
-    runner = make(FakeImplementer([limited]), FakeReviewer([]))
-
-    final = asyncio.run(runner.execute())
-
-    assert final is RunState.PAUSED_RATE_LIMIT
-
-
 def test_secret_hit_asks_owner_and_abort_aborts(env) -> None:
     make, paths, _ = env
 
@@ -259,3 +256,249 @@ def test_branch_gets_run_id_suffix_when_name_is_taken(env, origin: Path, tmp_pat
 
     assert runner.branch == f"orq/add-greeting-{runner.run_id.lower()}"
     assert runner.store.get_run(runner.run_id).branch == runner.branch
+
+
+# Phase 2: guard denials
+
+
+def denied(command: str, text: str = "I need to run that command.") -> AgentResult:
+    return AgentResult(ok=True, text=text, permission_denials=[{"tool_name": "Bash", "tool_use_id": "t1", "tool_input": {"command": command}}])
+
+
+class NoWriteImplementer(FakeImplementer):
+    """Like FakeImplementer, but the first call changes nothing (it only asked for a destructive action)."""
+
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+        if self.calls == 0:
+            self.prompts.append(prompt)
+            self.calls += 1
+            log_path.write_text("{}\n", encoding="utf-8")
+            return self.results.pop(0)
+        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event)
+
+
+def test_guard_denial_becomes_destructive_decision_and_approve_writes_token(env) -> None:
+    make, paths, _ = env
+    answers: list[Decision] = []
+
+    def human(decision: Decision) -> str:
+        answers.append(decision)
+        return "approve"
+
+    implementer = FakeImplementer([denied("git reset --hard HEAD~1"), ok()])
+    reviewer = FakeReviewer([review("continue", "carry on"), review("done", None)])
+    runner = make(implementer, reviewer, human=human)
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    guard = [d for d in answers if d.source == "guard"]
+    assert len(guard) == 1 and guard[0].destructive and guard[0].decision_type == "risk"
+    assert "git reset --hard HEAD~1" in guard[0].question
+    from orq.guard.rules import action_key
+    assert (paths.allow_tokens(runner.run_id) / action_key("Bash", {"command": "git reset --hard HEAD~1"})).exists()
+    assert "approved this action" in implementer.prompts[1] and "git reset --hard HEAD~1" in implementer.prompts[1]
+    assert "carry on" in implementer.prompts[1]
+
+
+def test_guard_denial_denied_by_owner_tells_implementer_to_proceed(env) -> None:
+    make, paths, _ = env
+    implementer = FakeImplementer([denied("rm -rf build"), ok()])
+    reviewer = FakeReviewer([review("continue", "carry on"), review("done", None)])
+    runner = make(implementer, reviewer, human=lambda d: "deny")
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    assert "denied this action" in implementer.prompts[1] and "rm -rf build" in implementer.prompts[1]
+    assert not any(paths.allow_tokens(runner.run_id).iterdir())
+
+
+def test_same_denied_action_twice_in_one_turn_asks_once(env) -> None:
+    make, paths, _ = env
+    result = AgentResult(ok=True, text="x", permission_denials=[
+        {"tool_name": "Bash", "tool_use_id": "t1", "tool_input": {"command": "git clean -fdx"}},
+        {"tool_name": "Bash", "tool_use_id": "t2", "tool_input": {"command": "git clean -fdx"}},
+    ])
+    asked: list[Decision] = []
+    runner = make(FakeImplementer([result, ok()]), FakeReviewer([review("continue"), review("done", None)]),
+                  human=lambda d: asked.append(d) or "deny")
+    asyncio.run(runner.execute())
+    assert len([d for d in asked if d.source == "guard"]) == 1
+
+
+def test_denial_without_other_work_skips_review(env) -> None:
+    make, paths, _ = env
+    implementer = NoWriteImplementer([denied("git reset --hard"), ok()])
+    reviewer = FakeReviewer([review("done", None)])
+    runner = make(implementer, reviewer, human=lambda d: "approve")
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    assert len(reviewer.prompts) == 1  # the empty first iteration was not reviewed
+    assert "approved this action" in implementer.prompts[1]
+
+
+# Phase 2: diff rules
+
+
+class DeletingImplementer(FakeImplementer):
+    """First call deletes README.md (a deleted_file violation); later calls behave like FakeImplementer."""
+
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+        if self.calls == 0:
+            (cwd / "README.md").unlink()
+        return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event)
+
+
+def test_diff_rule_violation_denied_resets_worktree(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    implementer = DeletingImplementer([ok(), ok()])
+    reviewer = FakeReviewer([review("done", None)])
+    runner = make(implementer, reviewer, human=lambda d: asked.append(d) or "deny")
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    guard = [d for d in asked if d.source == "guard"]
+    assert guard and "deleted_file" in guard[0].question and guard[0].destructive
+    assert (runner.worktree / "README.md").exists()            # the reset restored it
+    assert "rejected these changes" in implementer.prompts[1]
+    assert len(reviewer.prompts) == 1                           # iteration 1 was not reviewed
+    log = git("log", "--format=%s", cwd=runner.worktree).splitlines()
+    assert [l for l in log if l.startswith("orq(")] == [f"orq({runner.run_id}) iter 2: I changed things"]
+
+
+def test_diff_rule_violation_approved_commits(env) -> None:
+    make, paths, _ = env
+    implementer = DeletingImplementer([ok()])
+    reviewer = FakeReviewer([review("done", None)])
+    runner = make(implementer, reviewer, human=lambda d: "approve")
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    assert not (runner.worktree / "README.md").exists()
+    assert "deleted_file" in runner.rundir.decisions_text()
+
+
+# Phase 2: no progress
+
+
+class SameDiffImplementer(FakeImplementer):
+    """Creates same.txt once, then rewrites identical content: iterations 2 and 3 produce empty diffs."""
+
+    async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None):
+        self.prompts.append(prompt)
+        self.calls += 1
+        (cwd / "same.txt").write_text("same\n", encoding="utf-8")
+        log_path.write_text("{}\n", encoding="utf-8")
+        return self.results.pop(0)
+
+
+def test_no_progress_asks_and_rollback_discards_iterations(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+
+    def human(decision: Decision) -> str:
+        asked.append(decision)
+        return decision.options[1] if decision.source == "orq" else "0"
+
+    implementer = SameDiffImplementer([ok(), ok(), ok(), ok()])
+    reviewer = FakeReviewer([review("continue", "add the tests"), review("continue", "fix the docs"),
+                             review("continue", "polish"), review("done", None)])
+    runner = make(implementer, reviewer, human=human)
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    blocked = [d for d in asked if d.decision_type == "blocked"]
+    assert blocked and blocked[0].options[1] == "rollback to iteration 1" and "same_diff" in blocked[0].question
+    log = git("log", "--format=%s", cwd=runner.worktree).splitlines()
+    assert [l for l in log if l.startswith("orq(")] == [f"orq({runner.run_id}) iter 1: I changed things"]
+    # Iterations 2 and 3 were discarded; the fourth call is iteration 2 again and both sides hear about it.
+    assert "discarded" in implementer.prompts[3].lower() and "iteration 2" in implementer.prompts[3] and "## Iteration 2" in implementer.prompts[3]
+    assert "discarded" in reviewer.prompts[3].lower()
+    assert runner.store.get_run(runner.run_id).iteration == 2
+    archived = [p.name for p in (paths.run_dir(runner.run_id) / "iterations").iterdir() if "discarded" in p.name]
+    assert len(archived) == 2
+
+
+def test_no_progress_continue_resets_streak(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    implementer = SameDiffImplementer([ok(), ok(), ok()])
+    reviewer = FakeReviewer([review("continue", "add the tests"), review("continue", "fix the docs"), review("done", None)])
+    runner = make(implementer, reviewer, human=lambda d: asked.append(d) or "continue")
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert len([d for d in asked if d.decision_type == "blocked"]) == 1
+
+
+def test_no_progress_abort(env) -> None:
+    make, paths, _ = env
+    implementer = SameDiffImplementer([ok(), ok(), ok()])
+    reviewer = FakeReviewer([review("continue", "add the tests"), review("continue", "fix the docs"), review("continue", "polish")])
+    runner = make(implementer, reviewer, human=lambda d: "abort")
+    assert asyncio.run(runner.execute()) is RunState.ABORTED
+
+
+# Phase 2: rate limits and agent errors
+
+
+def rate_limited() -> AgentResult:
+    return AgentResult(ok=False, error="You've hit your session limit · resets 10pm (America/Cayenne)", error_kind="rate_limit",
+                       rate_limit={"status": "rejected", "resetsAt": 0})
+
+
+@pytest.fixture
+def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("orq.core.loop.asyncio.sleep", fake_sleep)
+    return slept
+
+
+def test_rate_limit_waits_then_retries_same_iteration(env, no_sleep) -> None:
+    make, paths, _ = env
+    implementer = FakeImplementer([rate_limited(), ok()])
+    runner = make(implementer, FakeReviewer([review("done", None)]))
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE and no_sleep and implementer.calls == 2
+    assert "PAUSED_RATE_LIMIT" in states(paths, runner.run_id)
+    assert runner.store.get_run(runner.run_id).iteration == 1
+
+
+def test_rate_limit_retries_exhausted_asks_owner(env, no_sleep) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    implementer = FakeImplementer([rate_limited()] * 4 + [ok()])
+    runner = make(implementer, FakeReviewer([review("done", None)]), human=lambda d: asked.append(d) or "retry")
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert asked and asked[0].decision_type == "blocked" and "rate limit" in asked[0].question
+    assert implementer.calls == 5
+
+
+def test_agent_error_becomes_retry_decision(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    implementer = FakeImplementer([AgentResult(ok=False, error="API Error: 529 Overloaded", error_kind="error"), ok()])
+    runner = make(implementer, FakeReviewer([review("done", None)]), human=lambda d: asked.append(d) or "retry")
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert asked[0].source == "orq" and "529" in asked[0].question and implementer.calls == 2
+
+
+def test_agent_error_abort(env) -> None:
+    make, paths, _ = env
+    implementer = FakeImplementer([AgentResult(ok=False, error="boom", error_kind="error")])
+    runner = make(implementer, FakeReviewer([]), human=lambda d: "abort")
+    assert asyncio.run(runner.execute()) is RunState.ABORTED

@@ -103,13 +103,9 @@ def test_rundir_layout_and_events(tmp_path: Path) -> None:
     assert all("ts" in e for e in events)
 
 
-def test_rundir_state_roundtrip_and_decisions_md(tmp_path: Path) -> None:
+def test_rundir_decisions_md(tmp_path: Path) -> None:
     rundir = RunDir(tmp_path / "runs" / "R1")
     rundir.create("# Task: x\n")
-
-    assert rundir.read_state() is None
-    rundir.write_state({"state": "REVIEWING", "iteration": 4})
-    assert rundir.read_state() == {"state": "REVIEWING", "iteration": 4}
 
     rundir.append_decision("D7K2", "Before or after tax?", "Before")
     text = rundir.decisions_text()

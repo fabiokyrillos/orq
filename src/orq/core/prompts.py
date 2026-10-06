@@ -26,6 +26,16 @@ Standing rules:
 - human must be null unless status is needs_human."""
 
 
+INTERRUPTED_NOTE = ("## Interrupted turn\nYour previous turn was interrupted before it finished. "
+                    "The worktree holds your uncommitted work; continue from there.")
+
+
+def guard_outcome_lines(approved: list[str], denied: list[str]) -> str:
+    lines = [f"- The owner approved this action; run exactly: `{a}`" for a in approved]
+    lines += [f"- The owner denied this action: `{d}`. Proceed without it." for d in denied]
+    return "## Guard decisions\n" + "\n".join(lines) if lines else ""
+
+
 def _task_block(task: Task) -> str:
     criteria = "\n".join(f"- [ ] {c}" for c in task.acceptance_criteria)
     out = "\n".join(f"- {c}" for c in task.out_of_scope) or "- (none)"
@@ -37,12 +47,17 @@ def _task_block(task: Task) -> str:
 
 
 def build_implementer_prompt(task: Task, *, iteration: int, milestone: str | None, next_prompt: str | None,
-                             decisions: str, previous_check: CheckResult | None) -> str:
+                             decisions: str, previous_check: CheckResult | None, discarded: str | None = None,
+                             interrupted: bool = False) -> str:
     parts = [_task_block(task), f"\n## Iteration {iteration}"]
     if milestone:
         parts.append(f"Current milestone: {milestone}")
     if decisions.strip():
         parts.append("## Owner decisions so far\n" + decisions.strip())
+    if discarded:
+        parts.append("## Discarded iterations\n" + discarded.strip())
+    if interrupted:
+        parts.append(INTERRUPTED_NOTE)
     if previous_check is not None and not previous_check.ok:
         parts.append("## Last check run failed\n```\n" + previous_check.output.strip()[-4000:] + "\n```")
     if next_prompt:
@@ -53,7 +68,8 @@ def build_implementer_prompt(task: Task, *, iteration: int, milestone: str | Non
 
 
 def build_reviewer_prompt(task: Task, *, iteration: int, milestone: str | None, diff_stat: str, diff_path: str,
-                          diff_excerpt: str | None, check: CheckResult, implementer_report: str, decisions: str) -> str:
+                          diff_excerpt: str | None, check: CheckResult, implementer_report: str, decisions: str,
+                          discarded: str | None = None) -> str:
     check_block = (
         f"exit code: {check.exit_code}, ok: {check.ok}, timed out: {check.timed_out}\n```\n{check.output.strip()[-4000:]}\n```"
     )
@@ -62,6 +78,8 @@ def build_reviewer_prompt(task: Task, *, iteration: int, milestone: str | None, 
         parts.append(f"Current milestone: {milestone}")
     if decisions.strip():
         parts.append("## Owner decisions so far\n" + decisions.strip())
+    if discarded:
+        parts.append("## Discarded iterations\n" + discarded.strip())
     parts.append(f"## Diff of this iteration (stat)\n```\n{diff_stat.strip() or '(no changes)'}\n```\nFull patch: {diff_path}")
     if diff_excerpt:
         parts.append("## Diff of this iteration (patch)\n```diff\n" + diff_excerpt + "\n```")

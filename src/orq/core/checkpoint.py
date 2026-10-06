@@ -18,6 +18,7 @@ class Checkpoint:
     branch: str
     worktree: str
     repo_path: str | None = None
+    clone_url: str | None = None                               # override used by tests and private mirrors
     base_commit: str | None = None
     last_commit: str | None = None
     iteration: int = 0

@@ -1,4 +1,4 @@
-"""Per-run directory: TASK.md, DECISIONS.md, state.json, events.jsonl, iterations (SPEC section 11)."""
+"""Per-run directory: TASK.md, DECISIONS.md, events.jsonl, iterations (SPEC section 11). state.json belongs to Checkpoint."""
 
 from __future__ import annotations
 
@@ -22,19 +22,17 @@ class RunDir:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def archive_iteration(self, n: int) -> None:
+        """Keep the logs of a discarded iteration out of the way of its replacement."""
+        path = self.path / "iterations" / str(n)
+        if path.exists():
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            path.rename(self.path / "iterations" / f"{n}.discarded-{stamp}")
+
     def event(self, event_type: str, **data: object) -> None:
         record = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"), "type": event_type, **data}
         with (self.path / "events.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    def write_state(self, state: dict) -> None:
-        tmp = self.path / "state.json.tmp"
-        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        tmp.replace(self.path / "state.json")
-
-    def read_state(self) -> dict | None:
-        path = self.path / "state.json"
-        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
     def append_decision(self, decision_id: str, question: str, answer: str) -> None:
         with (self.path / "DECISIONS.md").open("a", encoding="utf-8") as handle:

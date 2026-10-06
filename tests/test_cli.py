@@ -80,6 +80,7 @@ def test_logs_prints_events(home: OrqPaths) -> None:
 
 
 def test_run_refuses_repo_outside_sandbox_list(home: OrqPaths, tmp_path: Path) -> None:
+    home.config.write_text('[git]\nsandbox_repos = ["other/repo"]\n', encoding="utf-8")
     task = tmp_path / "TASK.md"
     task.write_text(TASK, encoding="utf-8")
 
@@ -109,7 +110,7 @@ def test_run_end_to_end_with_fake_clis(home: OrqPaths, origin: Path, tmp_path: P
     assert result.exit_code == 0, result.output
     assert "DONE" in result.output and "pull/42" in result.output
     gh_calls = [json.loads(l) for l in (tmp_path / "gh.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert gh_calls[0][:2] == ["pr", "create"]
+    assert [c[:2] for c in gh_calls] == [["pr", "view"], ["pr", "create"]]
     runs = Store(home.db).list_runs()
     assert runs[0].state is RunState.DONE
     assert "refs/heads/orq/add-greeting" in git("ls-remote", "--heads", str(origin), cwd=tmp_path)

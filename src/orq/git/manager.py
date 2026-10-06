@@ -132,6 +132,20 @@ class GitManager:
     def push(self, worktree: Path, branch: str) -> None:
         self.git("push", "-u", "origin", branch, cwd=worktree)
 
+    def commit_subject_and_parent(self, worktree: Path, ref: str = "HEAD") -> tuple[str, str]:
+        out = self.git("log", "-1", "--format=%s%n%P", ref, cwd=worktree).splitlines()
+        subject = out[0] if out else ""
+        parents = out[1].split() if len(out) > 1 else []
+        return subject, (parents[0] if parents else "")
+
+    def pr_url(self, worktree: Path, head: str) -> str | None:
+        """URL of the open PR for `head`, or None when there is none (a resumed finalize must not open a second PR)."""
+        try:
+            out = self._gh(["pr", "view", head, "--json", "url", "-q", ".url"], worktree)
+        except GitError:
+            return None
+        return out.strip() or None
+
     def create_pr(self, worktree: Path, base: str, head: str, title: str, body: str) -> str:
         out = self._gh(["pr", "create", "--base", base, "--head", head, "--title", title, "--body", body], worktree)
         return out.strip().splitlines()[-1]
