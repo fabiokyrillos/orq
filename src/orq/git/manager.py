@@ -74,6 +74,35 @@ class GitManager:
     def stage_all(self, worktree: Path) -> None:
         self.git("add", "-A", cwd=worktree)
 
+    def staged_files(self, worktree: Path) -> list[str]:
+        return [line for line in self.git("diff", "--cached", "--name-only", cwd=worktree).splitlines() if line.strip()]
+
+    def staged_name_status(self, worktree: Path) -> list[tuple[str, str]]:
+        """[(status, path)] for the index vs HEAD; a rename reports as ('R', new_path)."""
+        out: list[tuple[str, str]] = []
+        for line in self.git("diff", "--cached", "--name-status", "-M", cwd=worktree).splitlines():
+            parts = line.split("	")
+            if len(parts) >= 2 and parts[0]:
+                out.append((parts[0][0], parts[-1]))
+        return out
+
+    def staged_numstat(self, worktree: Path) -> list[tuple[int, int, str]]:
+        """[(added, deleted, path)] for text files in the index vs HEAD; binary files are skipped."""
+        out: list[tuple[int, int, str]] = []
+        for line in self.git("diff", "--cached", "--numstat", cwd=worktree).splitlines():
+            parts = line.split("	", 2)
+            if len(parts) == 3 and parts[0] != "-":
+                out.append((int(parts[0]), int(parts[1]), parts[2]))
+        return out
+
+    def staged_patch(self, worktree: Path) -> str:
+        return self.git("diff", "--cached", "--no-color", "-M", cwd=worktree)
+
+    def reset_hard(self, worktree: Path, sha: str) -> None:
+        """Discard everything after sha, including untracked files (the owner rejected the changes)."""
+        self.git("reset", "-q", "--hard", sha, cwd=worktree)
+        self.git("clean", "-fdq", cwd=worktree)
+
     def commit_staged(self, worktree: Path, message: str) -> str | None:
         """Commit what is staged; return the new sha, or None when the index is clean.
 

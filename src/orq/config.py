@@ -13,6 +13,8 @@ class LimitsConfig:
     max_iterations: int = 15
     max_wall_hours: float = 6
     max_concurrent_runs: int = 2
+    # Times a Claude usage limit is waited out within one iteration before the owner is asked.
+    rate_limit_retries: int = 3
 
 
 @dataclass
@@ -39,11 +41,22 @@ class GitConfig:
     # Short root: Windows LongPathsEnabled is often off and non-git tools fail past 260 chars.
     worktree_root: Path = Path("C:/orq-wt")
     protected_paths: list[str] = field(default_factory=lambda: [".github/**", "migrations/**", "**/.env*"])
-    # Until the guard (Phase 2) exists, runs are only allowed against these repos.
+    # Optional allowlist; an empty list allows any repo (the guard is the safety layer since Phase 2).
     sandbox_repos: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.worktree_root = Path(str(self.worktree_root)).expanduser()
+
+
+@dataclass
+class GuardConfig:
+    """Post-execution diff rules (SPEC 10.4)."""
+
+    # `negative_balance` fires when source files lose this many more lines than they gain in one iteration.
+    max_net_deleted_lines: int = 300
+    source_globs: list[str] = field(default_factory=lambda: [
+        "**/*.py", "**/*.js", "**/*.ts", "**/*.tsx", "**/*.jsx", "**/*.rs", "**/*.go", "**/*.java", "**/*.cs",
+    ])
 
 
 @dataclass
@@ -52,6 +65,7 @@ class Config:
     implementer: ImplementerConfig = field(default_factory=ImplementerConfig)
     reviewer: ReviewerConfig = field(default_factory=ReviewerConfig)
     git: GitConfig = field(default_factory=GitConfig)
+    guard: GuardConfig = field(default_factory=GuardConfig)
 
 
 def load_config(path: Path) -> Config:
