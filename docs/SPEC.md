@@ -394,14 +394,17 @@ reminder_hours = 3
 ## 14. CLI surface
 
 ```
-orq run <TASK.md> [--repo <path|owner/repo>] [--plan-approval required|skip]
+orq run <TASK.md> [--repo <path|owner/repo>] [--plan-approval required|skip] [--no-prompt]
 orq status [<run_id>]
-orq answer <decision_id> "<text>" | --approve | --deny
-orq pause | resume | abort <run_id>
+orq answer <decision_id> "<text>" | <option index> | --approve | --deny
+orq pause | abort <run_id>
+orq resume <run_id> [--no-prompt]
 orq rollback <run_id> --to <n>
 orq logs <run_id> [--follow]
 orq dashboard
 ```
+
+`--no-prompt` runs headless: the process exits at the first decision (`AWAITING_HUMAN`) and `orq answer` plus `orq resume` continue it. Without it, decisions are asked in the terminal.
 
 ## 15. Phases
 
@@ -443,6 +446,8 @@ Status: complete on 2026-10-06 (see `docs/phase1-findings.md`).
 * Rate limit handling and Claude reviewer fallback.
 
 **Exit criteria:** a forced destructive action pauses and resumes correctly after approve and after deny; a killed process resumes the run.
+
+Status: complete on 2026-10-06 (see `docs/phase2-findings.md`). Also delivered: headless mode (`orq run --no-prompt`, `orq resume --no-prompt`), `orq answer`, `orq pause`, `orq abort`, `orq rollback`.
 
 ### Phase 3: autonomous close
 

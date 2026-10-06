@@ -464,7 +464,10 @@ class Runner:
         decision = self.store.get_decision(pending["decision_id"])
         if decision is None:
             raise _Stop(RunState.FAILED, f"decision {pending['decision_id']} missing from the store")
-        if decision.status != "answered":
+        if decision.status == "answered":
+            # Answered out of process (`orq answer`); that command already logged the `answer` event.
+            self.rundir.event("answer_applied", decision_id=decision.decision_id, answer=decision.answer)
+        else:
             if self.human is None:
                 self.print(f"[{self.run_id}] waiting for: orq answer {decision.decision_id} ...")
                 raise _Stop(RunState.AWAITING_HUMAN, "decision pending")
@@ -472,8 +475,8 @@ class Runner:
             answer = decision.options[int(raw)] if raw.isdigit() and decision.options and 0 <= int(raw) < len(decision.options) else raw
             self.store.answer_decision(decision.decision_id, answer=answer, answered_via="cli")
             self.rundir.append_decision(decision.decision_id, decision.question, answer)
+            self.rundir.event("answer", decision_id=decision.decision_id, answer=answer, via="terminal")
             decision = self.store.get_decision(decision.decision_id)
-        self.rundir.event("answer", decision_id=decision.decision_id, answer=decision.answer)
         self.cp.pending_decision = None
         self._apply_answer(pending["kind"], pending.get("payload") or {}, decision.answer or "")
 
