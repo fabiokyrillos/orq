@@ -3,7 +3,7 @@
 **Spec version:** 1.0
 **Date:** 2026-10-05
 **Owner:** Binho (Fábio Kyrillos)
-**Status:** Phase 0 complete (see `docs/phase0-findings.md`). Ready for Phase 1.
+**Status:** Phases 0 and 1 complete (see `docs/phase0-findings.md`, `docs/phase1-findings.md`). Ready for Phase 2.
 
 ---
 
@@ -101,12 +101,12 @@ Every transition is written to `events.jsonl` and to SQLite before it takes effe
 2. Run the implementer (resume its session), stream events to the log and dashboard.
 3. If the implementer emitted a decision marker (section 8.3) → `AWAITING_HUMAN`.
 4. If the guard denied a tool call → `AWAITING_HUMAN` (destructive approval).
-5. Collect `git diff` against the last iteration commit.
-6. Post execution guard: diff rules and secret scan. Violation → `AWAITING_HUMAN`.
+5. Stage everything the implementer produced and collect `git diff` against the last iteration commit.
+6. Post execution guard on the staged content: diff rules and secret scan. Violation → `AWAITING_HUMAN`.
 7. Run the local check command.
-8. Commit the iteration on the run branch.
+8. Commit the iteration on the run branch, committing only the index from step 5. Files the check command generates (caches, build output) never enter the commit, and the commit is exactly what was scanned.
 9. Run the reviewer with: task, milestone, diff summary, check results, implementer's final message. The reviewer reads the repo itself.
-10. Act on reviewer status: `continue` → next iteration, `needs_human` → `AWAITING_HUMAN`, `done` → next milestone or `FINALIZING`.
+10. Act on reviewer status: `continue` → next iteration, `needs_human` → `AWAITING_HUMAN`, `done` → next milestone or `FINALIZING`. A `done` that still lists a `blocker` or `major` issue is treated as `continue`, with the issues as the next prompt (deterministic, seen in Phase 1).
 11. Check limits and no progress rules (section 10).
 
 ## 8. Contracts
@@ -270,7 +270,7 @@ Deleted files, removed tests, removed exported functions or routes, protected pa
 * One worktree per run, outside the repo: `<worktree_root>\<repo>\<run_id>`, default root `%USERPROFILE%\.orq\worktrees`. Set `core.longpaths=true` in the repo config; without it, checkout fails past 260 characters.
 * Worktree config also sets `core.autocrlf=false`; the owner's global `autocrlf=true` would otherwise rewrite line endings in public repos.
 * `core.longpaths` only fixes git. Python, PowerShell 5.1 (which Codex uses to read files) and other tools still fail past 260 characters unless Windows `LongPathsEnabled=1`. Prerequisite: the owner enables it, or sets a short `worktree_root` such as `C:\orq-wt`.
-* Branch `orq/<task-slug>`.
+* Branch `orq/<task-slug>`; if it already exists locally or on origin, `orq/<task-slug>-<run_id>`.
 * One commit per iteration: `orq(<run_id>) iter <n>: <summary>`.
 * `orq rollback <run_id> --to <n>` resets the worktree to that commit and tells the reviewer what was discarded.
 
@@ -402,6 +402,8 @@ Write findings to `docs/phase0-findings.md`. For each item record the exact comm
 * Ends by opening the PR. Merge is manual in this phase.
 
 **Exit criteria:** a small real task in a test repo goes from TASK.md to an open PR with no copy and paste.
+
+Status: complete on 2026-10-06 (see `docs/phase1-findings.md`).
 
 ### Phase 2: safety
 

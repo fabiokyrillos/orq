@@ -71,16 +71,28 @@ class GitManager:
     def head(self, worktree: Path) -> str:
         return self.git("rev-parse", "HEAD", cwd=worktree).strip()
 
-    def commit_all(self, worktree: Path, message: str) -> str | None:
-        """Stage everything and commit; return the new sha, or None when there is nothing to commit."""
+    def stage_all(self, worktree: Path) -> None:
         self.git("add", "-A", cwd=worktree)
-        if not self.git("status", "--porcelain", cwd=worktree).strip():
+
+    def commit_staged(self, worktree: Path, message: str) -> str | None:
+        """Commit what is staged; return the new sha, or None when the index is clean.
+
+        Files created after staging (for example __pycache__ from the check command) are left out.
+        """
+        if not self.git("diff", "--cached", "--name-only", cwd=worktree).strip():
             return None
         self.git("commit", "-q", "-m", message, cwd=worktree)
         return self.head(worktree)
 
-    def stage_all(self, worktree: Path) -> None:
-        self.git("add", "-A", cwd=worktree)
+    def commit_all(self, worktree: Path, message: str) -> str | None:
+        """Stage everything and commit; return the new sha, or None when there is nothing to commit."""
+        self.stage_all(worktree)
+        return self.commit_staged(worktree, message)
+
+    def branch_exists(self, repo_path: Path, branch: str) -> bool:
+        local = self.git("branch", "--list", branch, cwd=repo_path).strip()
+        remote = self.git("branch", "--list", "-r", f"origin/{branch}", cwd=repo_path).strip()
+        return bool(local or remote)
 
     def diff(self, worktree: Path, since: str) -> str:
         return self.git("diff", since, "HEAD", cwd=worktree)

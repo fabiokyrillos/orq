@@ -18,7 +18,8 @@ REVIEWER_RULES = """You are the reviewer in an automated implementer/reviewer lo
 Standing rules:
 - Any removal of a feature, file, test or behaviour not required by the task -> status needs_human with decision_type risk.
 - Never guess business rules. If the task is ambiguous, ask: status needs_human with decision_type business or ambiguity.
-- status done only when every acceptance criterion is met and the check command passes.
+- status done only when every acceptance criterion is met, the check command passes and there is no blocker or major issue left. If you list a blocker or major issue, status must be continue with a next_prompt that fixes it.
+- Generated or build artifacts (caches, compiled files, editor files) committed to the repo are a major issue.
 - Otherwise status continue, with next_prompt: concrete, self-contained instructions for the implementer's next turn. Mention file names.
 - Keep summary to a few sentences. List real problems in issues with a severity.
 - human must be null unless status is needs_human."""

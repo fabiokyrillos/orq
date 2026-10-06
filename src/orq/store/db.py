@@ -77,6 +77,9 @@ class Store:
     def set_iteration(self, run_id: str, iteration: int) -> None:
         self._update_run(run_id, iteration=iteration)
 
+    def set_branch(self, run_id: str, branch: str) -> None:
+        self._update_run(run_id, branch=branch)
+
     def set_worktree(self, run_id: str, worktree: str) -> None:
         self._update_run(run_id, worktree=worktree)
 

@@ -103,6 +103,10 @@ class Runner:
     def _setup(self) -> None:
         self._transition(RunState.QUEUED)
         repo_path = self.git.ensure_repo(self.task.repo, self.paths.repos, clone_url=self.clone_url)
+        if self.git.branch_exists(repo_path, self.branch):
+            # A previous run of the same task left its branch behind; keep both apart.
+            self.branch = f"{self.branch}-{self.run_id.lower()}"
+            self.store.set_branch(self.run_id, self.branch)
         self.git.create_worktree(repo_path, self.worktree, branch=self.branch, base=self.task.base_branch)
         self._last_commit = self.git.head(self.worktree)
         self.rundir.event("worktree", path=str(self.worktree), branch=self.branch, base_commit=self._last_commit)
@@ -146,7 +150,8 @@ class Runner:
 
         summary = (result.text.strip().splitlines() or ["no report"])[0][:60]
         since = self._last_commit or self.git.head(self.worktree)
-        commit = self.git.commit_all(self.worktree, f"orq({self.run_id}) iter {iteration}: {summary}")
+        # Only what was staged and scanned before the check command gets committed.
+        commit = self.git.commit_staged(self.worktree, f"orq({self.run_id}) iter {iteration}: {summary}")
         if commit:
             self._last_commit = commit
         self.rundir.event("commit", iteration=iteration, sha=commit)
@@ -164,6 +169,13 @@ class Runner:
                                decision_type=str(human.get("decision_type", "ambiguity")), question=str(human.get("question", "")),
                                options=[str(o) for o in human.get("options", [])], recommendation=human.get("recommendation")))
             return _IterationOutcome(next_prompt="Continue with the owner's answer above.", milestone=review.get("milestone"), done=False), check
+        serious = [i for i in review.get("issues", []) if i.get("severity") in ("blocker", "major")]
+        if status == "done" and serious:
+            # Deterministic rule: a review that lists blocker/major issues is not done, whatever it says.
+            self.rundir.event("done_overridden", iteration=iteration, issues=serious)
+            fixes = "\n".join(f"- [{i['severity']}] {i['description']}" for i in serious)
+            return _IterationOutcome(next_prompt="The reviewer reported these issues; fix them:\n" + fixes,
+                                     milestone=review.get("milestone"), done=False), check
         return _IterationOutcome(next_prompt=review.get("next_prompt"), milestone=review.get("milestone"), done=status == "done"), check
 
     async def _review(self, iteration: int, itdir: Path, stat: str, patch: str, check: CheckResult, report: str) -> dict:

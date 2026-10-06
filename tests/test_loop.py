@@ -220,3 +220,42 @@ def test_non_sandbox_repo_is_refused_before_any_work(env) -> None:
 
     with pytest.raises(SandboxError, match="owner/other"):
         make(FakeImplementer([]), FakeReviewer([]), task_text=TASK.replace("owner/sandbox", "owner/other"))
+
+
+def test_commit_only_contains_files_staged_before_the_check_command(env) -> None:
+    make, paths, _ = env
+    task_text = TASK.replace("python -c \"print('checks ok')\"", "python -c \"open('junk.txt','w').write('x'); print('ok')\"")
+    runner = make(FakeImplementer([ok()]), FakeReviewer([review("done", None)]), task_text=task_text)
+
+    asyncio.run(runner.execute())
+
+    committed = git("show", "--name-only", "--format=", "HEAD", cwd=runner.worktree).split()
+    assert "greeting1.txt" in committed
+    assert "junk.txt" not in committed
+
+
+def test_done_with_major_issue_is_treated_as_continue(env) -> None:
+    make, paths, _ = env
+    flawed = review("done", None)
+    flawed.structured["issues"] = [{"severity": "major", "description": "tracked __pycache__ files"}]
+    implementer = FakeImplementer([ok(), ok()])
+    runner = make(implementer, FakeReviewer([flawed, review("done", None)]))
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    assert implementer.calls == 2
+    assert "tracked __pycache__ files" in implementer.prompts[1]
+
+
+def test_branch_gets_run_id_suffix_when_name_is_taken(env, origin: Path, tmp_path: Path) -> None:
+    make, paths, _ = env
+    seed = tmp_path / "seed"
+    git("branch", "orq/add-greeting", cwd=seed)
+    git("push", "-q", "origin", "orq/add-greeting", cwd=seed)
+    runner = make(FakeImplementer([ok()]), FakeReviewer([review("done", None)]))
+
+    asyncio.run(runner.execute())
+
+    assert runner.branch == f"orq/add-greeting-{runner.run_id.lower()}"
+    assert runner.store.get_run(runner.run_id).branch == runner.branch
