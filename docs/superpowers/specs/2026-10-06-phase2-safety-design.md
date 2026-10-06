@@ -135,7 +135,6 @@ Written atomically (tmp + replace) at every checkpoint. Schema (version 1):
   "run_id": "R7K2PQ",
   "state": "IMPLEMENTING",
   "pid": 12345,
-  "child_pid": 12399,
   "iteration": 3,
   "phase": "implement",
   "branch": "orq/add-greeting",
@@ -181,7 +180,7 @@ Each phase function loads what it needs from the checkpoint and writes the next 
 `orq resume <run_id>`:
 
 1. Load `state.json`; refuse when `state` is `DONE`.
-2. If `pid` is alive, refuse ("run is still active"). If `child_pid` is alive, kill it (`taskkill /T /F` on Windows) and log it.
+2. If `pid` is alive, refuse ("run is still active"). If `<run_dir>/child.pid` names a live process (the adapter writes the CLI child's pid there), kill it (`taskkill /T /F` on Windows) and log it.
 3. Verify the worktree exists and `HEAD == last_commit`. A different HEAD is an error that stops the resume and tells the owner.
 4. Continue by `phase`:
    * `implement`: re-invoke the implementer with the stored session and a note: "Your previous turn was interrupted. The worktree holds your uncommitted work; continue from there." Uncommitted changes are kept (owner decision).
