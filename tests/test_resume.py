@@ -9,9 +9,10 @@ import pytest
 from orq.core.checkpoint import Checkpoint
 from orq.core.loop import ResumeError
 from orq.core.models import RunState
+from orq.verify.ci import CiStatus
 from orq.paths import OrqPaths
 from tests.conftest import git
-from tests.test_loop import FakeImplementer, FakePlanner, FakeReviewer, denied, env, ok, plan, review  # noqa: F401 - env fixture
+from tests.test_loop import FakeCi, FakeImplementer, FakePlanner, FakeReviewer, denied, env, ok, plan, review  # noqa: F401 - env fixture
 
 pytestmark = pytest.mark.usefixtures("origin")
 
@@ -80,7 +81,7 @@ def test_crash_during_review_reruns_only_the_review(env) -> None:
     resumed = make(implementer, reviewer, resume=runner.run_id)
 
     assert asyncio.run(resumed.execute()) is RunState.DONE
-    assert implementer.calls == 1 and len(reviewer.prompts) == 2
+    assert implementer.calls == 1 and len(reviewer.prompts) == 3  # crashed review, its re-run, the final review
     log = git("log", "--format=%s", cwd=resumed.worktree).splitlines()
     assert len([l for l in log if l.startswith("orq(")]) == 1
 
@@ -212,3 +213,51 @@ def test_crash_during_planning_resumes_the_plan_phase(env) -> None:
 
     assert asyncio.run(resumed.execute()) is RunState.DONE
     assert len(planner.prompts) == 2 and Checkpoint.load(state_file(paths, runner.run_id)).plan["milestones"][0]["title"] == "a"
+
+
+class CrashingCi(FakeCi):
+    def wait(self, worktree, pr_number):
+        if self.calls == 0:
+            self.calls += 1
+            raise Crash("killed")
+        return super().wait(worktree, pr_number)
+
+
+def test_crash_during_ci_wait_resumes_the_gate(env) -> None:
+    make, paths, _ = env
+    implementer = FakeImplementer([ok()])
+    reviewer = FakeReviewer([review("done", None), review("done", None)])
+    runner = make(implementer, reviewer, ci=CrashingCi())
+    with pytest.raises(Crash):
+        asyncio.run(runner.execute())
+    cp = Checkpoint.load(state_file(paths, runner.run_id))
+    assert cp.phase == "gate_ci" and cp.pr_number == 7
+
+    resumed = make(implementer, reviewer, ci=FakeCi(), resume=runner.run_id)
+
+    assert asyncio.run(resumed.execute()) is RunState.DONE
+    assert implementer.calls == 1 and len(reviewer.prompts) == 2
+    assert [e["type"] for e in events(paths, runner.run_id)].count("pr") == 1  # the PR was not recreated
+
+
+def test_crash_during_final_review_resumes_it(env) -> None:
+    make, paths, _ = env
+    implementer = FakeImplementer([ok()])
+
+    class FinalCrashReviewer(FakeReviewer):
+        """The milestone review answers; the first final review call crashes."""
+
+        async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
+            if len(self.prompts) == 1:
+                self.prompts.append(prompt)
+                raise Crash("killed")
+            return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event, **kwargs)
+
+    reviewer = FinalCrashReviewer([review("done", None), review("done", None)])
+    runner = make(implementer, reviewer)
+    with pytest.raises(Crash):
+        asyncio.run(runner.execute())
+    assert Checkpoint.load(state_file(paths, runner.run_id)).phase == "gate_review"
+
+    resumed = make(implementer, reviewer, resume=runner.run_id)
+    assert asyncio.run(resumed.execute()) is RunState.DONE

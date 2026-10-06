@@ -92,7 +92,7 @@ def test_run_refuses_repo_outside_sandbox_list(home: OrqPaths, tmp_path: Path) -
 
 def test_run_end_to_end_with_fake_clis(home: OrqPaths, origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home.config.write_text(
-        f'[git]\nworktree_root = "{(tmp_path / "wt").as_posix()}"\nsandbox_repos = ["owner/sandbox"]\n', encoding="utf-8"
+        f'[git]\nworktree_root = "{(tmp_path / "wt").as_posix()}"\nsandbox_repos = ["owner/sandbox"]\n[merge]\npoll_seconds = 0.05\n', encoding="utf-8"
     )
     task = tmp_path / "TASK.md"
     task.write_text(TASK, encoding="utf-8")
@@ -110,7 +110,10 @@ def test_run_end_to_end_with_fake_clis(home: OrqPaths, origin: Path, tmp_path: P
     assert result.exit_code == 0, result.output
     assert "DONE" in result.output and "pull/42" in result.output
     gh_calls = [json.loads(l) for l in (tmp_path / "gh.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert [c[:2] for c in gh_calls] == [["pr", "view"], ["pr", "create"]]
+    assert [c[:2] for c in gh_calls][:2] == [["pr", "view"], ["pr", "create"]]
+    assert ["pr", "merge", "42", "--squash", "--delete-branch"] in gh_calls
+    assert [c[:2] for c in gh_calls].count(["pr", "checks"]) >= 2  # no checks reported, pending, then pass
+    assert "merged" in result.output.lower()
     runs = Store(home.db).list_runs()
     assert runs[0].state is RunState.DONE
     assert "refs/heads/orq/add-greeting" in git("ls-remote", "--heads", str(origin), cwd=tmp_path)
@@ -207,7 +210,7 @@ def test_run_kill_and_resume_with_fake_clis(home: OrqPaths, origin: Path, tmp_pa
     from orq.core.checkpoint import Checkpoint
     from orq.core.procs import kill_tree, pid_alive
 
-    home.config.write_text(f'[git]\nworktree_root = "{(tmp_path / "wt").as_posix()}"\n', encoding="utf-8")
+    home.config.write_text(f'[git]\nworktree_root = "{(tmp_path / "wt").as_posix()}"\n[merge]\npoll_seconds = 0.05\n', encoding="utf-8")
     task = tmp_path / "TASK.md"
     task.write_text(TASK, encoding="utf-8")
     py = sys.executable
@@ -251,7 +254,7 @@ def test_run_kill_and_resume_with_fake_clis(home: OrqPaths, origin: Path, tmp_pa
 
 
 def test_run_no_prompt_stops_at_decision_and_resume_continues(home: OrqPaths, origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    home.config.write_text(f'[git]\nworktree_root = "{(tmp_path / "wt").as_posix()}"\n', encoding="utf-8")
+    home.config.write_text(f'[git]\nworktree_root = "{(tmp_path / "wt").as_posix()}"\n[merge]\npoll_seconds = 0.05\n', encoding="utf-8")
     task = tmp_path / "TASK.md"
     task.write_text(TASK, encoding="utf-8")
     py = sys.executable

@@ -14,6 +14,7 @@ from orq.core.task import parse_task
 from orq.git.manager import GitError, GitManager
 from orq.paths import OrqPaths
 from orq.store.db import Store
+from orq.verify.ci import CiStatus
 from orq.verify.secrets import SecretScanner
 from tests.conftest import git
 
@@ -62,7 +63,8 @@ class FakeReviewer:
     async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         self.prompts.append(prompt)
         log_path.write_text("{}\n", encoding="utf-8")
-        return self.outputs.pop(0)
+        # Out of scripted answers: the final review at the merge gate passes by default.
+        return self.outputs.pop(0) if self.outputs else review("done", None)
 
 
 def plan(*milestones: tuple[str, str], status: str = "plan", human: dict | None = None) -> AgentResult:
@@ -101,33 +103,51 @@ def clean_scanner() -> SecretScanner:
     return SecretScanner(runner=runner)
 
 
+class FakeCi:
+    """Scripted CI outcomes; the last one repeats."""
+
+    def __init__(self, statuses: list[CiStatus] | None = None) -> None:
+        self.statuses = list(statuses or [CiStatus("success")])
+        self.calls = 0
+
+    def wait(self, worktree, pr_number):
+        self.calls += 1
+        return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+
+
 @pytest.fixture
 def env(tmp_path: Path, origin: Path):
     paths = OrqPaths(tmp_path / "orq-home")
     config = Config()
     config.git.worktree_root = tmp_path / "wt"
     config.git.sandbox_repos = ["owner/sandbox"]
+    config.git.keep_worktree = True  # most tests inspect the worktree after DONE
     config.limits.max_iterations = 3
     pr_calls: list[list[str]] = []
 
     def fake_gh(args, cwd):
         pr_calls.append(args)
+        if args[:2] == ["pr", "view"] and "number" in args[-3]:
+            return "7\n"
+        if args[:2] == ["pr", "view"] and "state" in args[-3]:
+            return "MERGED\n"
         if args[:2] == ["pr", "view"]:
             raise GitError("no pull requests found")
         return "https://github.com/owner/sandbox/pull/1\n"
 
-    def make(implementer, reviewer, scanner=None, human=lambda d: "0", task_text=TASK, resume=None, planner=None):
+    def make(implementer, reviewer, scanner=None, human=lambda d: "0", task_text=TASK, resume=None, planner=None, ci=None):
         """human=None means headless: a decision stops the process instead of prompting."""
         store = Store(paths.db)
         planner = planner or FakePlanner([plan(("the whole task", "hard"))])
+        ci = ci or FakeCi()
         if resume:
             return Runner.resume(run_id=resume, config=config, paths=paths, store=store, git=GitManager(gh=fake_gh),
                                  implementer=implementer, reviewer=reviewer, scanner=scanner or clean_scanner(), human=human,
-                                 planner=planner)
+                                 planner=planner, ci=ci)
         return Runner(
             config=config, paths=paths, store=store, task=parse_task(task_text), task_text=task_text,
             git=GitManager(gh=fake_gh), implementer=implementer, reviewer=reviewer,
-            scanner=scanner or clean_scanner(), human=human, clone_url=str(origin), planner=planner,
+            scanner=scanner or clean_scanner(), human=human, clone_url=str(origin), planner=planner, ci=ci,
         )
 
     return make, paths, pr_calls
@@ -147,8 +167,8 @@ def test_happy_path_ends_with_open_pr(env, tmp_path: Path) -> None:
     final = asyncio.run(runner.execute())
 
     assert final is RunState.DONE
-    assert states(paths, runner.run_id)[-3:] == ["REVIEWING", "FINALIZING", "DONE"]
-    assert [c[:2] for c in pr_calls] == [["pr", "view"], ["pr", "create"]]
+    assert states(paths, runner.run_id)[-2:] == ["FINALIZING", "DONE"]
+    assert ["pr", "create"] == pr_calls[1][:2] and ["pr", "merge", "7", "--squash", "--delete-branch"] in pr_calls
     worktree = runner.worktree
     log = git("log", "--format=%s", cwd=worktree).splitlines()
     assert log[0].startswith(f"orq({runner.run_id}) iter 2:")
@@ -360,7 +380,7 @@ def test_denial_without_other_work_skips_review(env) -> None:
     final = asyncio.run(runner.execute())
 
     assert final is RunState.DONE
-    assert len(reviewer.prompts) == 1  # the empty first iteration was not reviewed
+    assert len(reviewer.prompts) == 2  # iteration 2 review and the final review; the empty iteration 1 was not reviewed
     assert "approved this action" in implementer.prompts[1]
 
 
@@ -390,7 +410,7 @@ def test_diff_rule_violation_denied_resets_worktree(env) -> None:
     assert guard and "deleted_file" in guard[0].question and guard[0].destructive
     assert (runner.worktree / "README.md").exists()            # the reset restored it
     assert "rejected these changes" in implementer.prompts[1]
-    assert len(reviewer.prompts) == 1                           # iteration 1 was not reviewed
+    assert len(reviewer.prompts) == 2                           # iteration 1 was not reviewed; iteration 2 plus the final review
     log = git("log", "--format=%s", cwd=runner.worktree).splitlines()
     assert [l for l in log if l.startswith("orq(")] == [f"orq({runner.run_id}) iter 2: I changed things"]
 
@@ -682,3 +702,160 @@ def test_done_milestones_with_empty_diffs_are_not_a_stall(env) -> None:
 
     assert asyncio.run(runner.execute()) is RunState.DONE
     assert asked == []
+
+
+# Phase 3: merge gate
+
+
+def gate_events(paths, run_id: str) -> list[dict]:
+    return [json.loads(l) for l in (paths.run_dir(run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+
+
+def test_gate_happy_path_merges_and_removes_worktree(env) -> None:
+    make, paths, pr_calls = env
+    reviewer = FakeReviewer([review("done", None), review("done", None)])  # milestone review, then the final review
+    runner = make(FakeImplementer([ok()]), reviewer)
+    runner.config.git.keep_worktree = False
+
+    final = asyncio.run(runner.execute())
+
+    assert final is RunState.DONE
+    assert ["pr", "merge", "7", "--squash", "--delete-branch"] in pr_calls
+    assert not runner.worktree.exists()
+    types = [e["type"] for e in gate_events(paths, runner.run_id)]
+    assert types[-3:] == ["pr_merged", "worktree_removed", "state"] and "ci" in types and "final_review" in types
+    assert "Final review before merge" in reviewer.prompts[1] and "checks passed" in reviewer.prompts[1]
+    assert runner.cp.pr_number == 7 and runner.cp.pr_url.endswith("/pull/1")
+
+
+def test_gate_ci_failure_goes_back_to_implement_with_the_log(env) -> None:
+    make, paths, pr_calls = env
+    ci = FakeCi([CiStatus("failure", failed_log="pytest: 1 failed"), CiStatus("success")])
+    implementer = FakeImplementer([ok(), ok()])
+    reviewer = FakeReviewer([review("done", None), review("done", None), review("done", None)])
+    runner = make(implementer, reviewer, ci=ci)
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert "GitHub Actions failed" in implementer.prompts[1] and "pytest: 1 failed" in implementer.prompts[1]
+    assert ci.calls == 2 and runner.cp.gate_rounds == 1
+    assert len([c for c in pr_calls if c[:2] == ["pr", "create"]]) == 1  # the second finalize reused the PR
+
+
+def test_gate_base_moved_rebases_and_force_pushes(env, origin: Path, tmp_path: Path) -> None:
+    make, paths, pr_calls = env
+    reviewer = FakeReviewer([review("done", None), review("done", None)])
+    runner = make(FakeImplementer([ok()]), reviewer)
+    seed = tmp_path / "seed"
+
+    class MovingCi(FakeCi):
+        def wait(self, worktree, pr_number):
+            if self.calls == 0:  # base moves while the first CI wait is in progress
+                (seed / "moved.txt").write_text("x\n", encoding="utf-8")
+                git("add", "-A", cwd=seed)
+                git("commit", "-q", "-m", "someone else", cwd=seed)
+                git("push", "-q", "origin", "main", cwd=seed)
+            return super().wait(worktree, pr_number)
+
+    runner.ci = MovingCi()
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    events = gate_events(paths, runner.run_id)
+    assert any(e["type"] == "base_moved_before_merge" for e in events) and any(e["type"] == "rebased" for e in events)
+    assert runner.ci.calls == 2
+    assert (runner.worktree / "moved.txt").exists() and (runner.worktree / "greeting1.txt").exists()
+    remote_head = git("rev-parse", "orq/add-greeting", cwd=origin).strip()
+    assert remote_head == git("rev-parse", "HEAD", cwd=runner.worktree).strip()
+
+
+def test_gate_rebase_conflict_asks_owner(env, tmp_path: Path) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+
+    class ConflictImplementer(FakeImplementer):
+        async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
+            (cwd / "README.md").write_text("ours\n", encoding="utf-8")
+            return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event, **kwargs)
+
+    seed = tmp_path / "seed"
+
+    class ConflictingCi(FakeCi):
+        def wait(self, worktree, pr_number):
+            if self.calls == 0:  # someone lands a conflicting change on main while CI runs
+                (seed / "README.md").write_text("theirs\n", encoding="utf-8")
+                git("add", "-A", cwd=seed)
+                git("commit", "-q", "-m", "conflict", cwd=seed)
+                git("push", "-q", "origin", "main", cwd=seed)
+            return super().wait(worktree, pr_number)
+
+    runner = make(ConflictImplementer([ok()]), FakeReviewer([review("done", None)]), ci=ConflictingCi(),
+                  human=lambda d: asked.append(d) or "abort")
+
+    assert asyncio.run(runner.execute()) is RunState.ABORTED
+    assert asked[-1].options == ["retry", "abort"] and "conflicts" in asked[-1].question
+
+
+def test_gate_final_review_continue_loops_once(env) -> None:
+    make, paths, _ = env
+    implementer = FakeImplementer([ok(), ok()])
+    not_done = review("continue", "add a docstring")
+    reviewer = FakeReviewer([review("done", None), not_done, review("done", None), review("done", None)])
+    runner = make(implementer, reviewer)
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert "Final review before merge: add a docstring" in implementer.prompts[1]
+    assert len(reviewer.prompts) == 4 and runner.cp.gate_rounds == 1
+
+
+def test_gate_done_with_major_issue_is_not_done(env) -> None:
+    make, paths, _ = env
+    flawed = review("done", None)
+    flawed.structured["issues"] = [{"severity": "major", "description": "README still mentions the old name"}]
+    implementer = FakeImplementer([ok(), ok()])
+    reviewer = FakeReviewer([review("done", None), flawed, review("done", None), review("done", None)])
+    runner = make(implementer, reviewer)
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert "README still mentions the old name" in implementer.prompts[1]
+
+
+def test_gate_rounds_exhausted_asks_owner(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    ci = FakeCi([CiStatus("failure", failed_log="boom")])
+    implementer = FakeImplementer([ok()] * 6)
+    reviewer = FakeReviewer([review("done", None)] * 6)
+    runner = make(implementer, reviewer, ci=ci, human=lambda d: asked.append(d) or "abort")
+    runner.config.limits.max_iterations = 10
+    runner.config.merge.max_gate_rounds = 2
+
+    assert asyncio.run(runner.execute()) is RunState.ABORTED
+    assert asked[-1].options == ["keep going", "abort"] and "3 times" in asked[-1].question
+
+
+def test_gate_no_ci_asks_and_merge_without_ci_continues(env) -> None:
+    make, paths, pr_calls = env
+    asked: list[Decision] = []
+    runner = make(FakeImplementer([ok()]), FakeReviewer([review("done", None), review("done", None)]), ci=FakeCi([CiStatus("none")]),
+                  human=lambda d: asked.append(d) or "merge without CI")
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert asked[-1].decision_type == "risk" and ["pr", "merge", "7", "--squash", "--delete-branch"] in pr_calls
+    assert any(e["type"] == "ci_skipped" for e in gate_events(paths, runner.run_id))
+
+
+def test_gate_ci_timeout_keep_waiting(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    ci = FakeCi([CiStatus("timeout"), CiStatus("success")])
+    runner = make(FakeImplementer([ok()]), FakeReviewer([review("done", None), review("done", None)]), ci=ci,
+                  human=lambda d: asked.append(d) or "keep waiting")
+    assert asyncio.run(runner.execute()) is RunState.DONE and ci.calls == 2
+    assert asked[-1].options == ["keep waiting", "abort"]
+
+
+def test_gate_final_review_needs_human(env) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    human_obj = {"decision_type": "business", "question": "Ship without the badge?", "options": ["yes", "no"], "recommendation": 0}
+    implementer = FakeImplementer([ok(), ok()])
+    reviewer = FakeReviewer([review("done", None), review("needs_human", None, human=human_obj), review("done", None), review("done", None)])
+    runner = make(implementer, reviewer, human=lambda d: asked.append(d) or "0")
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert asked[0].question == "Ship without the badge?" and "Ship without the badge?" in implementer.prompts[1]

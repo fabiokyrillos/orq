@@ -35,6 +35,10 @@ class GitManager:
     def __init__(self, gh: GhRunner = _run_gh) -> None:
         self._gh = gh
 
+    @property
+    def gh(self) -> GhRunner:
+        return self._gh
+
     def git(self, *args: str, cwd: Path) -> str:
         proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8")
         if proc.returncode != 0:

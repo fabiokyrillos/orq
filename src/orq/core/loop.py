@@ -36,6 +36,7 @@ from orq.paths import OrqPaths
 from orq.store.db import Store
 from orq.store.rundir import RunDir
 from orq.verify.checks import CheckResult, run_check
+from orq.verify.ci import CiStatus, CiWatcher
 from orq.verify.secrets import SecretScanner
 
 HumanInput = Callable[[Decision], str]
@@ -46,7 +47,8 @@ CHECK_TIMEOUT_SECONDS = 1800
 PAUSE_FLAG = "pause.requested"
 RATE_LIMIT_JITTER_SECONDS = 60
 _PHASE_STATE = {"plan": RunState.PLANNING, "implement": RunState.IMPLEMENTING, "verify": RunState.VERIFYING,
-                "review": RunState.REVIEWING, "finalize": RunState.FINALIZING}
+                "review": RunState.REVIEWING, "finalize": RunState.FINALIZING, "gate_ci": RunState.FINALIZING,
+                "gate_review": RunState.FINALIZING, "gate_merge": RunState.FINALIZING}
 
 
 class SandboxError(RuntimeError):
@@ -72,12 +74,14 @@ class Runner:
     def __init__(self, *, config: Config, paths: OrqPaths, store: Store, task: Task, task_text: str,
                  git: GitManager, implementer: Agent, reviewer: Agent, scanner: SecretScanner, human: HumanInput | None,
                  clone_url: str | None = None, printer: Printer = print, run_id: str | None = None,
-                 checkpoint: Checkpoint | None = None, planner: Agent | None = None) -> None:
+                 checkpoint: Checkpoint | None = None, planner: Agent | None = None, ci: CiWatcher | None = None) -> None:
         if config.git.sandbox_repos and task.repo not in config.git.sandbox_repos:
             raise SandboxError(f"{task.repo} is not listed in [git].sandbox_repos (empty list allows any repo)")
         self.config, self.paths, self.store, self.task = config, paths, store, task
         self.git, self.implementer, self.reviewer, self.scanner = git, implementer, reviewer, scanner
         self.planner = planner or reviewer  # SPEC 4: the planner is the reviewer agent at high effort
+        self.ci = ci or CiWatcher(git.gh, poll_seconds=config.merge.poll_seconds, timeout_minutes=config.merge.ci_timeout_minutes,
+                                  grace_minutes=config.merge.ci_grace_minutes, max_reruns=config.merge.max_ci_reruns)
         self.human, self.clone_url, self.print = human, clone_url, printer
         self._resumed_at = time.monotonic()
         if checkpoint is None:
@@ -111,7 +115,7 @@ class Runner:
     @classmethod
     def resume(cls, *, run_id: str, config: Config, paths: OrqPaths, store: Store, git: GitManager, implementer: Agent,
                reviewer: Agent, scanner: SecretScanner, human: HumanInput | None, printer: Printer = print,
-               planner: Agent | None = None) -> Runner:
+               planner: Agent | None = None, ci: CiWatcher | None = None) -> Runner:
         """Rebuild a Runner from state.json. Refuses live runs, finished runs and worktrees that moved."""
         rundir = RunDir(paths.run_dir(run_id))
         cp = Checkpoint.load(rundir.path / "state.json")
@@ -151,7 +155,7 @@ class Runner:
         (rundir.path / PAUSE_FLAG).unlink(missing_ok=True)
         rundir.event("resume", phase=cp.phase, iteration=cp.iteration, state=cp.state)
         return cls(config=config, paths=paths, store=store, task=task, task_text=task_text, git=git, implementer=implementer,
-                   reviewer=reviewer, scanner=scanner, human=human, printer=printer, checkpoint=cp, planner=planner)
+                   reviewer=reviewer, scanner=scanner, human=human, printer=printer, checkpoint=cp, planner=planner, ci=ci)
 
     # persistence
 
@@ -197,9 +201,15 @@ class Runner:
                     self._await()
                 elif phase == "finalize":
                     self._finalize()
-                    self._set_phase("done")
-                    self._transition(RunState.DONE)
-                    return RunState.DONE
+                elif phase == "gate_ci":
+                    self._gate_ci()
+                elif phase == "gate_review":
+                    await self._gate_review()
+                elif phase == "gate_merge":
+                    if self._gate_merge():
+                        self._set_phase("done")
+                        self._transition(RunState.DONE)
+                        return RunState.DONE
                 elif phase == "done":
                     return RunState.DONE
                 else:
@@ -453,18 +463,146 @@ class Runner:
         else:
             self._next_iteration()
 
+    # merge gate (SPEC 10.7): finalize -> gate_ci -> gate_review -> gate_merge
+
     def _finalize(self) -> None:
-        self._transition(RunState.FINALIZING)
-        scan = self.scanner.scan_range(self.worktree, f"origin/{self.task.base_branch}", report_path=self.rundir.path / "gitleaks.push.json")
-        if not scan.clean:
-            raise _Stop(RunState.FAILED, f"gitleaks found secrets in the branch history: {scan.findings}")
+        """Push the branch and make sure a PR exists; the gate phases take it from there."""
+        self._transition(RunState.FINALIZING, step="push")
+        self._scan_range_or_fail()
         self.git.push(self.worktree, self.cp.branch)
+        if self.cp.pr_number:
+            self.rundir.event("pr", url=self.cp.pr_url, number=self.cp.pr_number, reused=True)
+            self._set_phase("gate_ci")
+            return
         url = self.git.pr_url(self.worktree, head=self.cp.branch)
         if url is None:
             body = f"Automated by orq run {self.run_id}.\n\n{self.task.goal}\n\nCheck command: `{self.task.check_command}`"
             url = self.git.create_pr(self.worktree, base=self.task.base_branch, head=self.cp.branch, title=self.task.title, body=body)
-        self.rundir.event("pr", url=url)
-        self.print(f"[{self.run_id}] PR opened: {url}")
+            self.print(f"[{self.run_id}] PR opened: {url}")
+        number = self.git.pr_number(self.worktree, head=self.cp.branch)
+        if number is None:
+            raise _Stop(RunState.FAILED, f"cannot read the PR number for {self.cp.branch}")
+        self.cp.pr_url, self.cp.pr_number = url, number
+        self.rundir.event("pr", url=url, number=number)
+        self._set_phase("gate_ci")
+
+    def _scan_range_or_fail(self) -> None:
+        scan = self.scanner.scan_range(self.worktree, f"origin/{self.task.base_branch}", report_path=self.rundir.path / "gitleaks.push.json")
+        if not scan.clean:
+            raise _Stop(RunState.FAILED, f"gitleaks found secrets in the branch history: {scan.findings}")
+
+    def _gate_ci(self) -> None:
+        """Rebase when the base moved, then wait for GitHub Actions (re-running infrastructure failures)."""
+        self._transition(RunState.FINALIZING, step="ci", round=self.cp.gate_rounds + 1)
+        if self.git.base_moved(self.worktree, self.task.base_branch):
+            if not self.git.rebase_onto_base(self.worktree, self.task.base_branch):
+                self._raise_decision("rebase_conflict", Decision(
+                    decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
+                    question=f"Rebasing {self.cp.branch} onto origin/{self.task.base_branch} hit conflicts (rebase aborted). "
+                             f"Resolve by hand in {self.worktree}, then answer retry; or abort.",
+                    options=["retry", "abort"], recommendation=0), payload={})
+                return
+            self.cp.last_commit = self.git.head(self.worktree)
+            self.git.force_push(self.worktree, self.cp.branch)
+            self.rundir.event("rebased", onto=self.task.base_branch, head=self.cp.last_commit)
+        status = self.ci.wait(self.worktree, self.cp.pr_number or 0)
+        self.cp.ci_reruns += status.reruns
+        self.rundir.event("ci", state=status.state, reruns=status.reruns, waited_seconds=round(status.waited_seconds),
+                          checks=[{"name": c.get("name"), "bucket": c.get("bucket")} for c in status.checks])
+        if status.state == "success":
+            self._set_phase("gate_review")
+        elif status.state == "failure":
+            log = (status.failed_log or "").strip()[-4000:]
+            self._gate_round_failed("GitHub Actions failed on the PR. Failed log tail:\n```\n" + log + "\n```\nFix the cause so CI passes.")
+        elif status.state == "none":
+            self._raise_decision("ci_none", Decision(
+                decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="risk",
+                question=f"No GitHub checks appeared on PR #{self.cp.pr_number} within the grace period. Merge without CI?",
+                options=["merge without CI", "abort"], recommendation=1), payload={})
+        else:
+            self._raise_decision("ci_timeout", Decision(
+                decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
+                question=f"GitHub checks on PR #{self.cp.pr_number} did not finish within the timeout. Keep waiting?",
+                options=["keep waiting", "abort"], recommendation=0), payload={})
+
+    def _gate_round_failed(self, next_prompt: str) -> None:
+        """CI failed or the final review was not done: one more implementer iteration, then the gate restarts."""
+        self.cp.gate_rounds += 1
+        self.rundir.event("gate_round_failed", round=self.cp.gate_rounds, reason=next_prompt[:200])
+        if self.cp.gate_rounds > self.config.merge.max_gate_rounds:
+            self._raise_decision("gate_rounds", Decision(
+                decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
+                question=f"The merge gate failed {self.cp.gate_rounds} times (limit {self.config.merge.max_gate_rounds}). "
+                         f"Last reason: {next_prompt[:300]}. Keep going or abort?",
+                options=["keep going", "abort"], recommendation=1), payload={"next_prompt": next_prompt})
+            return
+        self.cp.outcome = {"next_prompt": next_prompt, "milestone": self.cp.outcome.get("milestone"), "done": False}
+        self._next_iteration()
+
+    async def _gate_review(self) -> None:
+        """Final reviewer pass at high effort against the whole task (SPEC 10.7 step 2)."""
+        self._transition(RunState.FINALIZING, step="final_review", round=self.cp.gate_rounds + 1)
+        it = self.cp.iteration
+        itdir = self.rundir.iteration(it)
+        base = f"origin/{self.task.base_branch}"
+        check = _check_from(self.cp.previous_check) or CheckResult(ok=False, exit_code=None, output="(no check output)", timed_out=False)
+        ci_note = f"PR #{self.cp.pr_number}: checks passed" if self.cp.ci_reruns == 0 else f"PR #{self.cp.pr_number}: checks passed after {self.cp.ci_reruns} infrastructure re-run(s)"
+        prompt = build_reviewer_prompt(
+            self.task, iteration=it, milestone=self.cp.outcome.get("milestone"), diff_stat=self.git.diff_stat(self.worktree, since=base),
+            diff_path=str(itdir / "diff.patch"), diff_excerpt=None, check=check, implementer_report=self.cp.report,
+            decisions=self.rundir.decisions_text(), plan=self.cp.plan, milestone_index=self.cp.milestone_index, final=True, ci_result=ci_note,
+        )
+        (itdir / "final_review.prompt.md").write_text(prompt, encoding="utf-8")
+        effort = self.config.reviewer.final_effort
+        result = await self._call("reviewer", self.reviewer, prompt, itdir / "final_review.stream.jsonl", None, effort=effort, contract=REVIEW_CONTRACT)
+        if result.error_kind == "invalid_output":
+            self.rundir.event("reviewer_invalid_output", iteration=it, error=result.error, final=True)
+            result = await self._call("reviewer", self.reviewer, prompt, itdir / "final_review.stream.jsonl", None, effort=effort, contract=REVIEW_CONTRACT)
+        problems = validate_review(result.structured)
+        if problems:
+            raise _Stop(RunState.FAILED, "final reviewer output invalid: " + "; ".join(problems))
+        review: dict = result.structured  # type: ignore[assignment]
+        (itdir / "final_review.output.json").write_text(json.dumps(review, indent=2), encoding="utf-8")
+        self.rundir.event("final_review", status=review["status"], summary=str(review.get("summary", ""))[:300])
+        if review["status"] == "needs_human":
+            h = review.get("human") or {}
+            self.cp.outcome = {"next_prompt": "Continue with the owner's answer above.", "milestone": self.cp.outcome.get("milestone"), "done": False}
+            self._raise_decision("reviewer", Decision(
+                decision_id=new_decision_id(), run_id=self.run_id, source="reviewer",
+                decision_type=str(h.get("decision_type", "ambiguity")), question=str(h.get("question", "")),
+                options=[str(o) for o in h.get("options", [])], recommendation=h.get("recommendation")), payload={})
+            return
+        serious = [i for i in review.get("issues", []) if i.get("severity") in ("blocker", "major")]
+        if review["status"] == "done" and not serious:
+            self._set_phase("gate_merge")
+            return
+        fixes = "\n".join(f"- [{i['severity']}] {i['description']}" for i in serious)
+        prompt_text = review.get("next_prompt") or "The final review did not pass."
+        if fixes:
+            prompt_text += "\nIssues:\n" + fixes
+        self._gate_round_failed("Final review before merge: " + prompt_text)
+
+    def _gate_merge(self) -> bool:
+        """Preconditions re-checked, then merge, verify, clean up (SPEC 10.7 steps 3 to 5). False: back to gate_ci."""
+        self._transition(RunState.FINALIZING, step="merge")
+        if self.store.pending_decisions(self.run_id):
+            raise _Stop(RunState.FAILED, "pending decisions at merge time")
+        if self.git.base_moved(self.worktree, self.task.base_branch):
+            self.rundir.event("base_moved_before_merge")
+            self._set_phase("gate_ci")
+            return False
+        self._scan_range_or_fail()
+        number = self.cp.pr_number or 0
+        self.git.merge_pr(self.worktree, number, strategy=self.config.git.merge_strategy)
+        state = self.git.pr_state(self.worktree, number)
+        if state != "MERGED":
+            raise _Stop(RunState.FAILED, f"gh pr merge returned but PR #{number} is {state}")
+        self.rundir.event("pr_merged", number=number, url=self.cp.pr_url, strategy=self.config.git.merge_strategy)
+        self.print(f"[{self.run_id}] PR merged: {self.cp.pr_url}")
+        if not self.config.git.keep_worktree and self.cp.repo_path:
+            self.git.remove_worktree(Path(self.cp.repo_path), self.worktree, branch=self.cp.branch)
+            self.rundir.event("worktree_removed", path=str(self.worktree))
+        return True
 
     # agents
 
@@ -614,6 +752,21 @@ class Runner:
                 raise _Stop(RunState.ABORTED, "owner aborted after an agent error")
             self.cp.rate_limit_retries = 0
             self._set_phase(payload.get("phase", self.cp.phase))
+        elif kind in ("rebase_conflict", "ci_timeout"):
+            if a == "abort":
+                raise _Stop(RunState.ABORTED, f"owner aborted at the merge gate ({kind})")
+            self._set_phase("gate_ci")
+        elif kind == "ci_none":
+            if a == "abort":
+                raise _Stop(RunState.ABORTED, "owner aborted: no CI on the repo")
+            self.rundir.event("ci_skipped", by="owner")
+            self._set_phase("gate_review")
+        elif kind == "gate_rounds":
+            if a == "abort":
+                raise _Stop(RunState.ABORTED, "owner aborted after repeated merge gate failures")
+            self.cp.gate_rounds = 0
+            self.cp.outcome = {"next_prompt": payload.get("next_prompt"), "milestone": self.cp.outcome.get("milestone"), "done": False}
+            self._next_iteration()
         else:
             raise _Stop(RunState.FAILED, f"unknown decision kind {kind}")
 

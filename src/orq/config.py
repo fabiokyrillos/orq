@@ -43,6 +43,8 @@ class GitConfig:
     protected_paths: list[str] = field(default_factory=lambda: [".github/**", "migrations/**", "**/.env*"])
     # Optional allowlist; an empty list allows any repo (the guard is the safety layer since Phase 2).
     sandbox_repos: list[str] = field(default_factory=list)
+    # Debugging aid: leave the worktree and local branch in place after the merge.
+    keep_worktree: bool = False
 
     def __post_init__(self) -> None:
         self.worktree_root = Path(str(self.worktree_root)).expanduser()
