@@ -72,6 +72,13 @@ def main() -> int:
     elif scenario == "structured":
         structured = {"status": "done", "summary": "fine", "milestone": "m1", "next_prompt": None, "issues": [], "human": None}
         lines = [init(session_id), result(json.dumps(structured), session_id=session_id, extra={"structured_output": structured})]
+    elif scenario == "hang":
+        # Emits the init event, then sleeps: stands in for a long implementer turn the owner kills orq during.
+        sys.stdout.write(json.dumps(init(session_id)) + "\n")
+        sys.stdout.flush()
+        import time
+        time.sleep(300)
+        return 1
     elif scenario == "crash":
         sys.stdout.write("not json at all\n")
         sys.stderr.write("No conversation found with session ID: x\n")

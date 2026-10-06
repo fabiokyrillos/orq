@@ -114,3 +114,137 @@ def test_run_end_to_end_with_fake_clis(home: OrqPaths, origin: Path, tmp_path: P
     runs = Store(home.db).list_runs()
     assert runs[0].state is RunState.DONE
     assert "refs/heads/orq/add-greeting" in git("ls-remote", "--heads", str(origin), cwd=tmp_path)
+
+
+# Phase 2 commands
+
+
+def seeded_run(home: OrqPaths, state: str = "AWAITING_HUMAN", phase: str = "await", pid: int = 999999):
+    from orq.core.checkpoint import Checkpoint
+    store = Store(home.db)
+    store.create_run(RunRecord(run_id="RAAAAA", repo="o/s", task_title="t", branch="b"))
+    store.set_state("RAAAAA", RunState(state))
+    rundir = RunDir(home.run_dir("RAAAAA"))
+    rundir.create(TASK)
+    cp = Checkpoint(run_id="RAAAAA", state=state, phase=phase, branch="b", worktree=str(home.root / "wt"))
+    cp.save(rundir.path / "state.json")
+    # save() stamps the current pid; pretend another process (dead or alive) owns the run.
+    state_path = rundir.path / "state.json"
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    data["pid"] = pid
+    state_path.write_text(json.dumps(data), encoding="utf-8")
+    return store, rundir
+
+
+def test_answer_records_decision(home: OrqPaths) -> None:
+    store, rundir = seeded_run(home)
+    store.add_decision(Decision(decision_id="DBBBB", run_id="RAAAAA", source="guard", decision_type="risk",
+                                question="Allow?", options=["approve", "deny"]))
+
+    result = CliRunner().invoke(app, ["answer", "DBBBB", "--approve"])
+
+    assert result.exit_code == 0, result.output
+    assert "orq resume RAAAAA" in result.output
+    assert Store(home.db).get_decision("DBBBB").answer == "approve"
+    assert "DBBBB" in (rundir.path / "DECISIONS.md").read_text(encoding="utf-8")
+    again = CliRunner().invoke(app, ["answer", "DBBBB", "--deny"])
+    assert again.exit_code == 1 and "already answered" in again.output
+
+
+def test_answer_with_text_and_validation(home: OrqPaths) -> None:
+    store, _ = seeded_run(home)
+    store.add_decision(Decision(decision_id="DBBBB", run_id="RAAAAA", source="implementer", decision_type="business",
+                                question="Tax?", options=["before", "after"]))
+    assert CliRunner().invoke(app, ["answer", "DBBBB"]).exit_code == 1
+    assert CliRunner().invoke(app, ["answer", "DBBBB", "text", "--approve"]).exit_code == 1
+    assert CliRunner().invoke(app, ["answer", "DZZZZ", "--approve"]).exit_code == 1
+    ok = CliRunner().invoke(app, ["answer", "DBBBB", "after taxes please"])
+    assert ok.exit_code == 0, ok.output
+    assert Store(home.db).get_decision("DBBBB").answer == "after taxes please"
+
+
+def test_pause_writes_flag(home: OrqPaths) -> None:
+    _, rundir = seeded_run(home, state="IMPLEMENTING", phase="implement")
+    result = CliRunner().invoke(app, ["pause", "RAAAAA"])
+    assert result.exit_code == 0, result.output
+    assert (rundir.path / "pause.requested").exists()
+    assert CliRunner().invoke(app, ["pause", "RNOPE1"]).exit_code == 1
+
+
+def test_abort_marks_inactive_run(home: OrqPaths) -> None:
+    seeded_run(home)
+    result = CliRunner().invoke(app, ["abort", "RAAAAA"])
+    assert result.exit_code == 0, result.output
+    assert Store(home.db).get_run("RAAAAA").state is RunState.ABORTED
+    from orq.core.checkpoint import Checkpoint
+    assert Checkpoint.load(home.run_dir("RAAAAA") / "state.json").phase == "done"
+
+
+def test_abort_refuses_live_run(home: OrqPaths) -> None:
+    import os
+    seeded_run(home, pid=os.getpid())
+    result = CliRunner().invoke(app, ["abort", "RAAAAA"])
+    assert result.exit_code == 1 and "still running" in result.output
+
+
+def test_resume_reports_missing_run(home: OrqPaths) -> None:
+    result = CliRunner().invoke(app, ["resume", "RNOPE1"])
+    assert result.exit_code == 1 and "state.json" in result.output
+
+
+def test_rollback_validates_target(home: OrqPaths) -> None:
+    seeded_run(home, state="PAUSED", phase="implement")
+    result = CliRunner().invoke(app, ["rollback", "RAAAAA", "--to", "3"])
+    assert result.exit_code == 1 and ("--to" in result.output or "worktree" in result.output)
+
+
+def test_run_kill_and_resume_with_fake_clis(home: OrqPaths, origin: Path, tmp_path: Path) -> None:
+    """Exit criterion for crash resume: kill orq mid-implementer, resume, reach DONE."""
+    import os
+    import subprocess
+    import time
+
+    from orq.core.checkpoint import Checkpoint
+    from orq.core.procs import kill_tree, pid_alive
+
+    home.config.write_text(f'[git]\nworktree_root = "{(tmp_path / "wt").as_posix()}"\n', encoding="utf-8")
+    task = tmp_path / "TASK.md"
+    task.write_text(TASK, encoding="utf-8")
+    py = sys.executable
+    env = {**os.environ, "ORQ_HOME": str(home.root), "ORQ_CLAUDE_EXE": f"{py} {FAKES / 'fake_claude.py'}",
+           "ORQ_CODEX_CMD": f"{py} {FAKES / 'fake_codex.py'}", "ORQ_GH_CMD": f"{py} {FAKES / 'fake_gh.py'}",
+           "FAKE_RECORD": str(tmp_path / "rec.json"), "FAKE_GH_RECORD": str(tmp_path / "gh.jsonl"),
+           "FAKE_SCENARIO": "hang", "FAKE_CODEX_SCENARIO": "done", "PYTHONUTF8": "1"}
+    proc = subprocess.Popen([py, "-m", "orq", "run", str(task), "--clone-url", str(origin)], env=env, cwd=str(tmp_path),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    child_pid = None
+    try:
+        deadline = time.time() + 90
+        run_id = None
+        while time.time() < deadline and run_id is None:
+            runs = Store(home.db).list_runs()
+            if runs and runs[0].state is RunState.IMPLEMENTING and (home.run_dir(runs[0].run_id) / "child.pid").exists():
+                run_id = runs[0].run_id
+                child_pid = int((home.run_dir(run_id) / "child.pid").read_text(encoding="utf-8").strip())
+            time.sleep(0.5)
+        assert run_id, "run never reached IMPLEMENTING"
+        # Kill only orq, leaving the fake claude child behind as an orphan.
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/F"], capture_output=True)
+        proc.wait(timeout=20)
+    finally:
+        if proc.poll() is None:
+            kill_tree(proc.pid)
+    assert pid_alive(child_pid), "the hanging fake claude should still be alive after orq was killed"
+    cp = Checkpoint.load(home.run_dir(run_id) / "state.json")
+    assert cp.phase == "implement" and cp.state == "IMPLEMENTING"
+
+    env["FAKE_SCENARIO"] = "ok"
+    resumed = subprocess.run([py, "-m", "orq", "resume", run_id], env=env, cwd=str(tmp_path), capture_output=True,
+                             text=True, encoding="utf-8", timeout=180)
+
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert not pid_alive(child_pid)
+    assert Store(home.db).get_run(run_id).state is RunState.DONE
+    assert "interrupted" in (home.iteration_dir(run_id, 1) / "implementer.prompt.md").read_text(encoding="utf-8").lower()
+    events = [json.loads(l) for l in (home.run_dir(run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(e["type"] == "orphan_killed" for e in events) and any(e["type"] == "resume" for e in events)
