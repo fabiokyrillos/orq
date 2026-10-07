@@ -60,22 +60,33 @@
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "SELECT id, text, received_at FROM orq_messages WHERE direction = 'in' AND consumed_at IS NULL AND id > $1 ORDER BY id LIMIT 50",
-        "options": { "queryReplacement": "={{ Number($json.query.since || 0) }}" }
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": { "__rl": true, "mode": "name", "value": "orq_messages" },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            { "keyName": "consumed", "condition": "isFalse" },
+            { "keyName": "id", "condition": "gt", "keyValue": "={{ Number($json.query.since || 0) }}" }
+          ]
+        },
+        "returnAll": false,
+        "limit": 50,
+        "orderBy": true,
+        "orderByColumn": "id",
+        "orderByDirection": "ASC"
       },
       "id": "b2",
-      "name": "Select unconsumed",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.5,
+      "name": "Unconsumed rows",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
       "position": [260, 220],
-      "credentials": { "postgres": { "id": "REPLACE", "name": "orq postgres" } },
       "alwaysOutputData": true
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { messages: $input.all().filter(i => i.json.id !== undefined).map(i => ({ id: i.json.id, text: i.json.text, received_at: i.json.received_at })) } }}",
+        "responseBody": "={{ { messages: $input.all().filter(i => i.json.id !== undefined).map(i => ({ id: i.json.id, text: i.json.text, received_at: i.json.createdAt })) } }}",
         "options": {}
       },
       "id": "b3",
@@ -102,25 +113,45 @@
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "UPDATE orq_messages SET consumed_at = now() WHERE id = ANY($1::bigint[]) AND consumed_at IS NULL",
-        "options": { "queryReplacement": "={{ '{' + ($json.body.ids || []).join(',') + '}' }}" }
+        "jsCode": "const ids = ($input.first().json.body || {}).ids || [];\nif (!ids.length) { return [{ json: { id: -1 } }]; }\nreturn ids.map(id => ({ json: { id: Number(id) } }));"
       },
       "id": "c2",
+      "name": "One item per id",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 440]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": { "__rl": true, "mode": "name", "value": "orq_messages" },
+        "matchType": "allConditions",
+        "filters": { "conditions": [ { "keyName": "id", "condition": "eq", "keyValue": "={{ $json.id }}" } ] },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": { "consumed": true },
+          "schema": [
+            { "id": "text", "displayName": "text", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "from_number", "displayName": "from_number", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "consumed", "displayName": "consumed", "required": false, "defaultMatch": false, "display": true, "type": "boolean", "canBeUsedToMatch": true }
+          ]
+        }
+      },
+      "id": "c3",
       "name": "Mark consumed",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.5,
-      "position": [260, 440],
-      "credentials": { "postgres": { "id": "REPLACE", "name": "orq postgres" } },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [520, 440],
       "alwaysOutputData": true
     },
     {
       "parameters": { "respondWith": "json", "responseBody": "={{ { ok: true } }}", "options": {} },
-      "id": "c3",
+      "id": "c4",
       "name": "Respond ack",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [520, 440]
+      "position": [780, 440]
     },
 
     {
@@ -138,7 +169,7 @@
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
           "conditions": [
             {
               "id": "owner",
@@ -165,26 +196,37 @@
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "INSERT INTO orq_messages (direction, from_number, text) VALUES ('in', $1, $2)",
-        "options": {
-          "queryReplacement": "={{ [ ($json.body.data?.key?.remoteJid || '').split('@')[0], $json.body.data?.message?.conversation || $json.body.data?.message?.extendedTextMessage?.text || '' ] }}"
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": { "__rl": true, "mode": "name", "value": "orq_messages" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "text": "={{ $json.body.data?.message?.conversation || $json.body.data?.message?.extendedTextMessage?.text || '' }}",
+            "from_number": "={{ ($json.body.data?.key?.remoteJid || '').split('@')[0] }}",
+            "consumed": false
+          },
+          "schema": [
+            { "id": "text", "displayName": "text", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "from_number", "displayName": "from_number", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "consumed", "displayName": "consumed", "required": false, "defaultMatch": false, "display": true, "type": "boolean", "canBeUsedToMatch": true }
+          ]
         }
       },
       "id": "d3",
       "name": "Insert inbound",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.5,
-      "position": [520, 640],
-      "credentials": { "postgres": { "id": "REPLACE", "name": "orq postgres" } }
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [520, 640]
     }
   ],
   "connections": {
     "Webhook notify": { "main": [ [ { "node": "Evolution sendText", "type": "main", "index": 0 } ] ] },
     "Evolution sendText": { "main": [ [ { "node": "Respond notify", "type": "main", "index": 0 } ] ] },
-    "Webhook replies": { "main": [ [ { "node": "Select unconsumed", "type": "main", "index": 0 } ] ] },
-    "Select unconsumed": { "main": [ [ { "node": "Respond replies", "type": "main", "index": 0 } ] ] },
-    "Webhook ack": { "main": [ [ { "node": "Mark consumed", "type": "main", "index": 0 } ] ] },
+    "Webhook replies": { "main": [ [ { "node": "Unconsumed rows", "type": "main", "index": 0 } ] ] },
+    "Unconsumed rows": { "main": [ [ { "node": "Respond replies", "type": "main", "index": 0 } ] ] },
+    "Webhook ack": { "main": [ [ { "node": "One item per id", "type": "main", "index": 0 } ] ] },
+    "One item per id": { "main": [ [ { "node": "Mark consumed", "type": "main", "index": 0 } ] ] },
     "Mark consumed": { "main": [ [ { "node": "Respond ack", "type": "main", "index": 0 } ] ] },
     "Webhook Evolution inbound": { "main": [ [ { "node": "Only the owner", "type": "main", "index": 0 } ] ] },
     "Only the owner": { "main": [ [ { "node": "Insert inbound", "type": "main", "index": 0 } ], [] ] }

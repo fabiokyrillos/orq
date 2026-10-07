@@ -1,48 +1,64 @@
 # WhatsApp bridge: n8n + Evolution API setup
 
-orq talks to three authenticated n8n webhooks (SPEC 9.3) and never to Evolution or Postgres directly. The owner's phone number lives only in n8n. The files under `docs/n8n/` were written by hand against n8n 1.x node schemas, not exported from a live instance: import, then open each node once to confirm credentials and expressions.
+orq talks to three authenticated n8n webhooks (SPEC 9.3) and never to Evolution directly. Inbound messages are kept in an n8n **Data table** (no external database). The owner's phone number lives only in n8n. `docs/n8n/orq-workflow.json` was written by hand against n8n 1.x node schemas (Data table node 1.1), not exported from a live instance: import, then open each node once to confirm credentials and the three placeholders.
 
-## 1. Postgres
+## 1. Data table
 
-Run `docs/n8n/orq_messages.sql` on the VPS database n8n can reach. Create an n8n Postgres credential named `orq postgres` for it.
+In n8n, **Overview → Data tables → Create data table** named exactly `orq_messages`, with these columns (the `id`, `createdAt` and `updatedAt` columns are automatic):
 
-## 2. n8n credentials
+| Column | Type |
+|---|---|
+| `text` | String |
+| `from_number` | String |
+| `consumed` | Boolean |
 
-Two *Header Auth* credentials and one Postgres credential, created under Credentials:
+## 2. Credentials
 
-| Credential | Type | Name header | Value |
-|---|---|---|---|
-| `orq bearer` | Header Auth | `Authorization` | `Bearer <long random token>` (the same token goes into `ORQ_N8N_TOKEN` on the PC) |
-| `evolution apikey` | Header Auth | `apikey` | the instance's API key shown in Evolution Manager (eye icon on the instance card) |
-| `orq postgres` | Postgres | | host, database, user, password of a Postgres n8n can reach |
+Two *Header Auth* credentials, created under **Credentials**:
+
+| Credential | Name header | Value |
+|---|---|---|
+| `orq bearer` | `Authorization` | `Bearer <long random token>` (the same token goes into `ORQ_N8N_TOKEN` on the PC) |
+| `evolution apikey` | `apikey` | the instance's API key shown in Evolution Manager (eye icon on the instance card) |
+
+Generate the token on the PC: `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
 ## 3. Import the workflow
 
-Import `docs/n8n/orq-workflow.json`, attach `orq bearer` to the three authenticated webhooks, `evolution apikey` to the `Evolution sendText` node and `orq postgres` to the three Postgres nodes. Then edit three placeholders: in `Evolution sendText`, the URL `https://EVOLUTION_HOST/message/sendText/INSTANCE_NAME` (your Evolution host and the instance name) and `OWNER_NUMBER` in the JSON body; in `Only the owner`, `OWNER_NUMBER` again. The owner number is your personal number in international format without `+`, not the instance's number. Activate the workflow. Production URLs look like `https://<n8n>/webhook/orq/notify`; `[notify].n8n_base_url` in `config.toml` is the part before `/orq/...`, so `https://<n8n>/webhook`.
+**Create workflow → Import from file → `docs/n8n/orq-workflow.json`**, then:
 
-Point Evolution's webhook for the sender instance at `https://<n8n>/webhook/orq/evolution` with the `MESSAGES_UPSERT` event enabled. The `Only the owner` node drops everything that is not from `ORQ_OWNER_NUMBER` or that the sender itself wrote.
+1. `Webhook notify`, `Webhook replies`, `Webhook ack`: select the credential `orq bearer`.
+2. `Evolution sendText`: select `evolution apikey`; set the URL to `https://<evolution host>/message/sendText/<instance name>`; in the JSON body replace `OWNER_NUMBER` with your personal number, international format without `+` (`5581XXXXXXXXX`). This is the number that receives and answers, not the instance's own number.
+3. `Only the owner`: replace `OWNER_NUMBER` with the same number.
+4. `Unconsumed rows`, `Mark consumed`, `Insert inbound`: open each once so the node loads the `orq_messages` columns; the table is referenced by name.
+5. Save and **activate**. Production URLs are `https://<n8n>/webhook/orq/...`; `[notify].n8n_base_url` in `config.toml` is the part before `/orq/...`, so `https://<n8n>/webhook`.
 
-## 4. Test from the PC
+## 4. Evolution webhook
 
-```bash
-curl -sS -X POST "$N8N/orq/notify" -H "Authorization: Bearer $ORQ_N8N_TOKEN" -H "Content-Type: application/json" -d '{"text":"*[orq] test*"}'
+In Evolution Manager, instance settings → **Webhook**: enabled, URL `https://<n8n>/webhook/orq/evolution`, event `MESSAGES_UPSERT` only. The `Only the owner` node drops messages from any other number and the sender's own messages.
+
+## 5. Test from the PC (PowerShell)
+
+```powershell
+$N8N = "https://<n8n>/webhook"
+Invoke-RestMethod -Method Post -Uri "$N8N/orq/notify" -Headers @{Authorization="Bearer $env:ORQ_N8N_TOKEN"} -ContentType "application/json" -Body '{"text":"*[orq] test*"}'
 ```
 
-Expect `{"ok":true}` and the message on your phone. Reply `hello` from your phone, then:
+Expect `ok True` and the message on your phone. Reply `hello` from your phone, then:
 
-```bash
-curl -sS "$N8N/orq/replies?since=0" -H "Authorization: Bearer $ORQ_N8N_TOKEN"
+```powershell
+Invoke-RestMethod -Uri "$N8N/orq/replies?since=0" -Headers @{Authorization="Bearer $env:ORQ_N8N_TOKEN"}
 ```
 
-Expect `{"messages":[{"id":1,"text":"hello","received_at":"..."}]}`. Ack it:
+Expect `messages` with one entry (`id`, `text`, `received_at`). Ack it with that `id`:
 
-```bash
-curl -sS -X POST "$N8N/orq/replies/ack" -H "Authorization: Bearer $ORQ_N8N_TOKEN" -H "Content-Type: application/json" -d '{"ids":[1]}'
+```powershell
+Invoke-RestMethod -Method Post -Uri "$N8N/orq/replies/ack" -Headers @{Authorization="Bearer $env:ORQ_N8N_TOKEN"} -ContentType "application/json" -Body '{"ids":[1]}'
 ```
 
-A second `replies?since=0` must now return an empty list. A request without the header must get HTTP 401/403 from n8n.
+A second `replies?since=0` must return an empty list. A request without the header must be rejected by n8n (401/403).
 
-## 5. orq side
+## 6. orq side
 
 ```toml
 [notify]
@@ -50,7 +66,11 @@ n8n_base_url = "https://<n8n>/webhook"
 n8n_token_env = "ORQ_N8N_TOKEN"
 ```
 
-Set `ORQ_N8N_TOKEN` in the environment, then `orq dashboard`. It prints `WhatsApp: on` and from then on sends every new decision and run completion, reminds after `[notify].reminder_hours`, and polls replies every `[notify].poll_seconds`.
+```powershell
+[Environment]::SetEnvironmentVariable("ORQ_N8N_TOKEN", "<token>", "User")
+```
+
+Open a new terminal, then `orq dashboard`. It prints `WhatsApp: on` and from then on sends every new decision and run completion, reminds after `[notify].reminder_hours`, and polls replies every `[notify].poll_seconds`.
 
 Reply formats (also sent back as a hint when a message is not understood):
 

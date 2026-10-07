@@ -22,7 +22,7 @@ Design: `docs/superpowers/specs/2026-10-07-phase4-remote-human-design.md`. Plan:
 * Outbound: pending decisions (SPEC 9.3 format, 1-based option numbers) and run completions, each once; reminders after `reminder_hours`. Runs that were already finished when the hub starts are not announced.
 * Inbound: cursor in the `kv` table, batch ack, one confirmation or hint per message. Destructive decisions accept only `APPROVE <id>`/`DENY <id>`; a number gets the destructive hint. Commands `STATUS`, `PAUSE`, `RESUME` (spawns `orq resume`), `ABORT` (refuses live runs).
 * Both loops swallow and log n8n errors so the dashboard keeps working when the VPS is unreachable.
-* Deliverables for the VPS: `docs/n8n/orq_messages.sql`, `docs/n8n/orq-workflow.json` (hand-written against n8n 1.x node schemas; review each node after import), `docs/n8n-setup.md` with `curl` checks for the three endpoints.
+* Deliverables for the VPS: `docs/n8n/orq-workflow.json` (hand-written against n8n 1.x node schemas, Data table node 1.1; review each node after import), `docs/n8n-setup.md` with PowerShell checks for the three endpoints. Storage is an n8n Data table, not Postgres: the owner has no Postgres at hand.
 
 ## 4. Other findings
 
