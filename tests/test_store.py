@@ -110,3 +110,63 @@ def test_rundir_decisions_md(tmp_path: Path) -> None:
     rundir.append_decision("D7K2", "Before or after tax?", "Before")
     text = rundir.decisions_text()
     assert "D7K2" in text and "Before or after tax?" in text and "Before" in text
+
+
+# slots (Phase 5)
+
+DEAD = {999}
+
+
+def acquire(store: Store, run_id: str, repo: str = "o/a", *, pid: int = 1, fresh: bool = True, limit: int = 2, project: int = 1) -> bool:
+    return store.try_acquire_slot(run_id, repo, pid, fresh=fresh, global_limit=limit, default_project_limit=project,
+                                  alive=lambda p: p not in DEAD)
+
+
+def test_slots_respect_global_and_project_limits(store: Store) -> None:
+    assert acquire(store, "R1", "o/a")
+    assert not acquire(store, "R2", "o/a")      # project o/a holds its one slot
+    assert acquire(store, "R3", "o/b")
+    assert not acquire(store, "R4", "o/c")      # global limit 2 reached
+    assert acquire(store, "R1", "o/a")          # already held: idempotent
+
+    store.release_slot("R1")
+
+    assert acquire(store, "R2", "o/a")
+    held = {s["run_id"] for s in store.slot_usage() if s["held"]}
+    assert held == {"R2", "R3"}
+
+
+def test_project_setting_overrides_the_default_cap(store: Store) -> None:
+    store.create_run(RunRecord(run_id="X", repo="o/a", task_title="t", branch="b"))
+    store.update_project("o/a", max_concurrent=2)
+
+    assert acquire(store, "R1", "o/a", limit=3) and acquire(store, "R2", "o/a", limit=3)
+    assert not acquire(store, "R3", "o/a", limit=3)
+
+
+def test_dead_holders_are_reclaimed(store: Store) -> None:
+    assert acquire(store, "R1", pid=999)
+
+    assert acquire(store, "R2", pid=2)
+    assert [s["run_id"] for s in store.slot_usage()] == ["R2"]
+
+
+def test_started_runs_go_before_fresh_ones_and_fifo_within_a_class(store: Store) -> None:
+    assert acquire(store, "HOLD", "o/x", limit=1)
+    assert not acquire(store, "NEW1", "o/a", limit=1, fresh=True)
+    assert not acquire(store, "NEW2", "o/b", limit=1, fresh=True)
+    assert not acquire(store, "OLD", "o/c", limit=1, fresh=False)   # answered its decision, wants to continue
+    store.release_slot("HOLD")
+
+    assert not acquire(store, "NEW1", "o/a", limit=1)                # OLD waits and outranks it
+    assert acquire(store, "OLD", "o/c", limit=1, fresh=False)
+    store.release_slot("OLD")
+    assert not acquire(store, "NEW2", "o/b", limit=1)                # NEW1 is older
+    assert acquire(store, "NEW1", "o/a", limit=1)
+
+
+def test_a_better_waiter_that_cannot_run_does_not_block(store: Store) -> None:
+    assert acquire(store, "A1", "o/a", limit=3)
+    assert not acquire(store, "A2", "o/a", limit=3, fresh=False)     # blocked by its project cap, not by the global one
+
+    assert acquire(store, "B1", "o/b", limit=3)                      # a free global slot is not held back for A2

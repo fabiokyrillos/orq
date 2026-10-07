@@ -77,3 +77,11 @@ def test_notify_and_dashboard_sections(tmp_path: Path) -> None:
     assert config.notify.n8n_base_url == "https://vps.example/webhook" and config.notify.reminder_hours == 1
     assert config.notify.n8n_token_env == "ORQ_N8N_TOKEN" and config.notify.answer_poll_seconds == 3 and config.notify.toast is True
     assert config.dashboard.port == 9000
+
+
+def test_queue_section(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("[queue]\npoll_seconds = 2\n", encoding="utf-8")
+    config = load_config(path)
+    assert config.queue.poll_seconds == 2 and config.queue.project_concurrency == 1
+    assert Config().queue.poll_seconds == 5

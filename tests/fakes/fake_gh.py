@@ -21,7 +21,12 @@ created = any(call[:2] == ["pr", "create"] for call in history[:-1])
 merged = any(call[:2] == ["pr", "merge"] for call in history[:-1])
 checks_polls = sum(1 for call in history[:-1] if call[:2] == ["pr", "checks"])
 
-if args[:2] == ["pr", "create"]:
+if args[:2] == ["repo", "view"]:
+    if os.environ.get("FAKE_GH_REPO_MISSING"):
+        sys.stderr.write("GraphQL: Could not resolve to a Repository\n")
+        sys.exit(1)
+    print(json.dumps({"nameWithOwner": args[2], "defaultBranchRef": {"name": "main"}}))
+elif args[:2] == ["pr", "create"]:
     print("https://github.com/owner/sandbox/pull/42")
 elif args[:2] == ["pr", "view"] and "url" in args:
     if os.environ.get("FAKE_GH_PR_EXISTS") or created:

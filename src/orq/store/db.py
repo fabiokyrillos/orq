@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from orq.core.models import Decision, RunRecord, RunState
+from orq.core.models import Decision, Project, RunRecord, RunState
+from orq.core.procs import pid_alive
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -49,7 +52,31 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS projects (
+    repo TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    base_branch TEXT NOT NULL DEFAULT 'main',
+    check_command TEXT NOT NULL DEFAULT '',
+    max_concurrent INTEGER,
+    local_path TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS slots (
+    run_id TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    held INTEGER NOT NULL DEFAULT 0,
+    fresh INTEGER NOT NULL DEFAULT 1,
+    since REAL NOT NULL
+);
 """
+
+# Runs register their repo as a project; databases from before Phase 5 get theirs when opened.
+_REGISTER_PROJECTS = """
+INSERT OR IGNORE INTO projects (repo, name, created_at)
+SELECT repo, substr(repo, instr(repo, '/') + 1), min(created_at) FROM runs {where} GROUP BY repo
+"""
+_PROJECT_FIELDS = ("name", "base_branch", "check_command", "max_concurrent", "local_path")
 
 
 def _now() -> str:
@@ -62,6 +89,8 @@ class Store:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)  # the hub serves requests from worker threads
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._conn.execute(_REGISTER_PROJECTS.format(where=""))
+        self._conn.commit()
 
     # runs
 
@@ -72,6 +101,36 @@ class Store:
             (run.run_id, run.repo, run.task_title, run.branch, run.state.value, run.iteration,
              run.worktree, run.implementer_session, run.reviewer_session, now, now),
         )
+        self._conn.execute(_REGISTER_PROJECTS.format(where="WHERE repo = ?"), (run.repo,))
+        self._conn.commit()
+
+    # projects
+
+    def upsert_project(self, project: Project) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO projects (repo, name, base_branch, check_command, max_concurrent, local_path, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, coalesce((SELECT created_at FROM projects WHERE repo = ?), ?))",
+            (project.repo, project.name, project.base_branch, project.check_command, project.max_concurrent, project.local_path,
+             project.repo, project.created_at or _now()),
+        )
+        self._conn.commit()
+
+    def get_project(self, repo: str) -> Project | None:
+        row = self._conn.execute("SELECT * FROM projects WHERE repo = ?", (repo,)).fetchone()
+        return Project(**dict(row)) if row else None
+
+    def list_projects(self) -> list[Project]:
+        rows = self._conn.execute("SELECT * FROM projects ORDER BY lower(name), repo").fetchall()
+        return [Project(**dict(r)) for r in rows]
+
+    def update_project(self, repo: str, **fields: object) -> None:
+        unknown = set(fields) - set(_PROJECT_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown project fields: {sorted(unknown)}")
+        if not fields:
+            return
+        assignments = ", ".join(f"{name} = ?" for name in fields)
+        self._conn.execute(f"UPDATE projects SET {assignments} WHERE repo = ?", (*fields.values(), repo))
         self._conn.commit()
 
     def get_run(self, run_id: str) -> RunRecord | None:
@@ -103,6 +162,61 @@ class Store:
         assignments = ", ".join(f"{name} = ?" for name in fields)
         self._conn.execute(f"UPDATE runs SET {assignments} WHERE run_id = ?", (*fields.values(), run_id))
         self._conn.commit()
+
+    # slots (Phase 5): a run holds one while it works; waiting for the owner holds none
+
+    def try_acquire_slot(self, run_id: str, repo: str, pid: int, *, fresh: bool, global_limit: int, default_project_limit: int,
+                         alive: Callable[[int], bool] = pid_alive) -> bool:
+        """Register as a waiter and take a slot when the limits allow it and no better waiter could take it first.
+
+        Better means: a run that already started (it answered a decision) before one that never ran, then oldest first.
+        Rows of dead processes are dropped, so a crash never leaks a slot.
+        """
+        conn = self._conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM slots").fetchall()]
+            for row in rows:
+                if row["run_id"] != run_id and not alive(row["pid"]):
+                    conn.execute("DELETE FROM slots WHERE run_id = ?", (row["run_id"],))
+            rows = [r for r in rows if r["run_id"] == run_id or alive(r["pid"])]
+            me = next((r for r in rows if r["run_id"] == run_id), None)
+            if me is not None and me["held"]:
+                conn.execute("UPDATE slots SET pid = ? WHERE run_id = ?", (pid, run_id))
+                conn.commit()
+                return True
+            if me is None:
+                me = {"run_id": run_id, "repo": repo, "pid": pid, "held": 0, "fresh": int(fresh), "since": time.time()}
+                conn.execute("INSERT INTO slots VALUES (:run_id, :repo, :pid, :held, :fresh, :since)", me)
+                rows.append(me)
+            else:
+                me.update(pid=pid, fresh=int(fresh), repo=repo)
+                conn.execute("UPDATE slots SET pid = ?, fresh = ?, repo = ? WHERE run_id = ?", (pid, int(fresh), repo, run_id))
+            caps = {r["repo"]: r["max_concurrent"] for r in conn.execute("SELECT repo, max_concurrent FROM projects").fetchall()}
+            held = [r for r in rows if r["held"]]
+
+            def has_room(target: str) -> bool:
+                cap = caps.get(target) or default_project_limit
+                return len(held) < global_limit and sum(1 for r in held if r["repo"] == target) < cap
+
+            rank = (me["fresh"], me["since"])
+            granted = has_room(repo) and not any(
+                not r["held"] and r["run_id"] != run_id and (r["fresh"], r["since"]) < rank and has_room(r["repo"]) for r in rows)
+            if granted:
+                conn.execute("UPDATE slots SET held = 1 WHERE run_id = ?", (run_id,))
+            conn.commit()
+            return granted
+        except BaseException:
+            conn.rollback()
+            raise
+
+    def release_slot(self, run_id: str) -> None:
+        self._conn.execute("DELETE FROM slots WHERE run_id = ?", (run_id,))
+        self._conn.commit()
+
+    def slot_usage(self) -> list[dict]:
+        """Every slot row (held or waiting), oldest first."""
+        return [dict(r) for r in self._conn.execute("SELECT * FROM slots ORDER BY since").fetchall()]
 
     # decisions
 

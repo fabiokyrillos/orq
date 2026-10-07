@@ -224,6 +224,45 @@ def dashboard(port: int | None = typer.Option(None, "--port", help="Override [da
     uvicorn.run(create_app(paths, config, whatsapp=whatsapp), host="127.0.0.1", port=chosen, log_level="warning")
 
 
+project_app = typer.Typer(no_args_is_help=True, help="Projects: the GitHub repos orq works on.")
+app.add_typer(project_app, name="project")
+
+
+@project_app.command("add")
+def project_add(
+    source: str = typer.Argument(..., help="owner/repo, or a local folder whose origin is on GitHub."),
+    name: str | None = typer.Option(None, "--name", help="Display name (default: the repo name)."),
+    base: str | None = typer.Option(None, "--base", help="Base branch (default: the repo's default branch)."),
+    check: str | None = typer.Option(None, "--check", help="Default check command for new tasks."),
+    max_concurrent: int | None = typer.Option(None, "--max-concurrent", help="Active runs at once for this project."),
+) -> None:
+    """Register a project (or update one). orq always works in its own clone, never in the given folder."""
+    from orq.core.projects import ProjectError, add_project
+
+    paths = OrqPaths.from_env()
+    try:
+        project = add_project(Store(paths.db), GitManager(), source, name=name, base_branch=base, check_command=check,
+                              max_concurrent=max_concurrent)
+    except ProjectError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1)
+    typer.echo(f"project {project.repo} ({project.name}), base {project.base_branch}")
+
+
+@project_app.command("list")
+def project_list() -> None:
+    """List the projects with their defaults."""
+    paths = OrqPaths.from_env()
+    config = load_config(paths.config)
+    projects = Store(paths.db).list_projects()
+    if not projects:
+        typer.echo("no projects")
+        return
+    for p in projects:
+        cap = p.max_concurrent if p.max_concurrent is not None else config.queue.project_concurrency
+        typer.echo(f"{p.repo:<40} {p.name:<24} base {p.base_branch:<10} max {cap}  check: {p.check_command or '-'}")
+
+
 @app.command()
 def rollback(run_id: str, to: int = typer.Option(..., "--to", help="Iteration to roll back to (0 = base commit).")) -> None:
     """Reset a stopped run's worktree to an earlier iteration; `orq resume` then continues from there."""

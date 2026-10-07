@@ -54,6 +54,19 @@ class RunRecord:
 
 
 @dataclass
+class Project:
+    """A GitHub repo the hub works on (Phase 5). Runs join on `repo`."""
+
+    repo: str  # owner/repo
+    name: str
+    base_branch: str = "main"
+    check_command: str = ""
+    max_concurrent: int | None = None  # None: [queue].project_concurrency
+    local_path: str | None = None  # the folder it was added from, informational only
+    created_at: str | None = None
+
+
+@dataclass
 class Decision:
     decision_id: str
     run_id: str

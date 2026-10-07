@@ -356,3 +356,33 @@ def test_run_waits_for_an_answer_from_another_channel(home: OrqPaths, origin: Pa
     events = [json.loads(l) for l in (home.run_dir(run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert any(e["type"] == "answer" and e["via"] == "dashboard" and e["answer"] == "deny" for e in events)
     assert any(e["type"] == "decision" for e in events) and "AWAITING_HUMAN" in result.output
+
+
+def test_project_add_and_list(home: OrqPaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORQ_GH_CMD", f"{sys.executable} {FAKES / 'fake_gh.py'}")
+    monkeypatch.setenv("FAKE_GH_RECORD", str(tmp_path / "gh.jsonl"))
+    folder = tmp_path / "checkout"
+    folder.mkdir()
+    git("init", "-q", cwd=folder)
+    git("remote", "add", "origin", "https://github.com/owner/from-folder.git", cwd=folder)
+
+    added = CliRunner().invoke(app, ["project", "add", "owner/sandbox", "--check", "uv run pytest -q", "--max-concurrent", "2"])
+    from_folder = CliRunner().invoke(app, ["project", "add", str(folder), "--name", "Folder"])
+    listing = CliRunner().invoke(app, ["project", "list"])
+
+    assert added.exit_code == 0, added.output
+    assert "owner/sandbox" in added.output
+    assert from_folder.exit_code == 0, from_folder.output
+    assert "owner/from-folder" in listing.output and "Folder" in listing.output and "uv run pytest -q" in listing.output
+    assert Store(home.db).get_project("owner/sandbox").max_concurrent == 2
+
+
+def test_project_add_rejects_unknown_repo(home: OrqPaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORQ_GH_CMD", f"{sys.executable} {FAKES / 'fake_gh.py'}")
+    monkeypatch.setenv("FAKE_GH_RECORD", str(tmp_path / "gh.jsonl"))
+    monkeypatch.setenv("FAKE_GH_REPO_MISSING", "1")
+
+    result = CliRunner().invoke(app, ["project", "add", "owner/missing"])
+
+    assert result.exit_code == 1
+    assert "Could not resolve" in result.output

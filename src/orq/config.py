@@ -93,6 +93,14 @@ class DashboardConfig:
 
 
 @dataclass
+class QueueConfig:
+    """Queue and slots (Phase 5). The global cap is [limits].max_concurrent_runs."""
+
+    poll_seconds: float = 5                # hub dispatcher tick and a run's wait for a free slot
+    project_concurrency: int = 1           # active runs per project unless the project sets its own
+
+
+@dataclass
 class Config:
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     implementer: ImplementerConfig = field(default_factory=ImplementerConfig)
@@ -102,6 +110,7 @@ class Config:
     merge: MergeConfig = field(default_factory=MergeConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    queue: QueueConfig = field(default_factory=QueueConfig)
 
 
 def load_config(path: Path) -> Config:

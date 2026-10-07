@@ -19,11 +19,39 @@ def repo(manager: GitManager, origin: Path, tmp_path: Path) -> Path:
 def test_ensure_repo_clones_then_fetches(manager: GitManager, origin: Path, tmp_path: Path) -> None:
     path = manager.ensure_repo("owner/sandbox", tmp_path / "repos", clone_url=str(origin))
 
-    assert path == tmp_path / "repos" / "sandbox"
+    assert path == tmp_path / "repos" / "owner" / "sandbox"  # owner kept: two owners may both have a `sandbox`
     assert (path / ".git").is_dir()
 
     again = manager.ensure_repo("owner/sandbox", tmp_path / "repos", clone_url=str(origin))
     assert again == path
+
+
+def test_lock_path_is_next_to_the_clone_for_repo_and_worktree(manager: GitManager, repo: Path, tmp_path: Path) -> None:
+    worktree = tmp_path / "wt" / "sandbox" / "R1"
+    manager.create_worktree(repo, worktree, branch="orq/x", base="main")
+
+    expected = repo.parent / "sandbox.orq.lock"
+    assert manager.lock_path(repo) == expected
+    assert manager.lock_path(worktree) == expected
+
+
+def test_shared_ref_writes_wait_for_the_repo_lock(origin: Path, repo: Path, tmp_path: Path) -> None:
+    from orq.core.locks import LockTimeout
+    from tests.test_locks import hold_in_child
+
+    manager = GitManager(lock_timeout=0.5)
+    worktree = tmp_path / "wt" / "sandbox" / "R1"
+    manager.create_worktree(repo, worktree, branch="orq/x", base="main")
+    child = hold_in_child(manager.lock_path(repo), 10)
+    try:
+        with pytest.raises(LockTimeout):
+            manager.push(worktree, "orq/x")
+        with pytest.raises(LockTimeout):
+            manager.ensure_repo("owner/sandbox", tmp_path / "repos", clone_url=str(origin))
+        assert manager.head(worktree)  # read-only commands do not take the lock
+    finally:
+        child.kill()
+        child.wait()
 
 
 def test_create_worktree_on_new_branch_from_origin_base(manager: GitManager, repo: Path, tmp_path: Path) -> None:

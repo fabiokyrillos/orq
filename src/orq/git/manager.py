@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from orq.adapters.base import split_command
+from orq.core.locks import file_lock
 
 GhRunner = Callable[[list[str], Path], str]
 
@@ -32,8 +33,10 @@ def _run_gh(args: list[str], cwd: Path) -> str:
 
 
 class GitManager:
-    def __init__(self, gh: GhRunner = _run_gh) -> None:
+    def __init__(self, gh: GhRunner = _run_gh, *, lock_timeout: float = 600) -> None:
         self._gh = gh
+        self._lock_timeout = lock_timeout
+        self._lock_paths: dict[Path, Path] = {}
 
     @property
     def gh(self) -> GhRunner:
@@ -45,32 +48,50 @@ class GitManager:
             raise GitError(f"git {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
         return proc.stdout
 
+    def lock_path(self, path: Path) -> Path:
+        """`<clone>.orq.lock` next to the clone, for the clone itself or any of its worktrees."""
+        if path not in self._lock_paths:
+            try:
+                clone = Path(self.git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=path).strip()).parent
+            except GitError:
+                clone = path  # not a checkout (gh-only calls in tests): a private lock is harmless
+            self._lock_paths[path] = clone.with_name(clone.name + ".orq.lock")
+        return self._lock_paths[path]
+
+    def _locked(self, path: Path):
+        """Concurrent runs share one clone: serialise the commands that write shared refs or the worktree list."""
+        return file_lock(self.lock_path(path), timeout=self._lock_timeout)
+
     def ensure_repo(self, repo: str, repos_root: Path, clone_url: str | None = None) -> Path:
-        """Clone `owner/repo` under repos_root (or fetch if present) and return the checkout path."""
-        name = repo.split("/")[-1]
-        path = repos_root / name
-        if (path / ".git").exists():
-            self.git("fetch", "--prune", "origin", cwd=path)
-            return path
-        repos_root.mkdir(parents=True, exist_ok=True)
-        url = clone_url or f"https://github.com/{repo}.git"
-        self.git("clone", "-q", "-c", "core.longpaths=true", "-c", "core.autocrlf=false", url, str(path), cwd=repos_root)
+        """Clone `owner/repo` to repos_root/owner/repo (or fetch if present) and return the checkout path."""
+        owner, name = repo.split("/", 1)
+        path = repos_root / owner / name
+        self._lock_paths[path] = path.with_name(name + ".orq.lock")
+        with self._locked(path):
+            if (path / ".git").exists():
+                self.git("fetch", "--prune", "origin", cwd=path)
+                return path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            url = clone_url or f"https://github.com/{repo}.git"
+            self.git("clone", "-q", "-c", "core.longpaths=true", "-c", "core.autocrlf=false", url, str(path), cwd=path.parent)
         return path
 
     def create_worktree(self, repo_path: Path, worktree: Path, branch: str, base: str) -> None:
-        self.git("fetch", "origin", base, cwd=repo_path)
-        self.git("config", "core.longpaths", "true", cwd=repo_path)
-        worktree.parent.mkdir(parents=True, exist_ok=True)
-        self.git("worktree", "add", "-b", branch, str(worktree), f"origin/{base}", cwd=repo_path)
+        with self._locked(repo_path):
+            self.git("fetch", "origin", base, cwd=repo_path)
+            self.git("config", "core.longpaths", "true", cwd=repo_path)
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+            self.git("worktree", "add", "-b", branch, str(worktree), f"origin/{base}", cwd=repo_path)
         # Worktrees share the repo config, but these are also set here in case the repo was not cloned by orq.
         self.git("config", "core.longpaths", "true", cwd=worktree)
         self.git("config", "core.autocrlf", "false", cwd=worktree)
 
     def remove_worktree(self, repo_path: Path, worktree: Path, branch: str | None = None) -> None:
-        self.git("worktree", "remove", "--force", str(worktree), cwd=repo_path)
-        self.git("worktree", "prune", cwd=repo_path)
-        if branch:
-            self.git("branch", "-D", branch, cwd=repo_path)
+        with self._locked(repo_path):
+            self.git("worktree", "remove", "--force", str(worktree), cwd=repo_path)
+            self.git("worktree", "prune", cwd=repo_path)
+            if branch:
+                self.git("branch", "-D", branch, cwd=repo_path)
 
     def head(self, worktree: Path) -> str:
         return self.git("rev-parse", "HEAD", cwd=worktree).strip()
@@ -134,7 +155,8 @@ class GitManager:
         return self.git("diff", "--stat", since, "HEAD", cwd=worktree)
 
     def push(self, worktree: Path, branch: str) -> None:
-        self.git("push", "-u", "origin", branch, cwd=worktree)
+        with self._locked(worktree):
+            self.git("push", "-u", "origin", branch, cwd=worktree)
 
     def commit_subject_and_parent(self, worktree: Path, ref: str = "HEAD") -> tuple[str, str]:
         out = self.git("log", "-1", "--format=%s%n%P", ref, cwd=worktree).splitlines()
@@ -144,7 +166,8 @@ class GitManager:
 
     def base_moved(self, worktree: Path, base: str) -> bool:
         """True when origin/<base> has commits that are not in HEAD (the PR needs a rebase)."""
-        self.git("fetch", "origin", base, cwd=worktree)
+        with self._locked(worktree):
+            self.git("fetch", "origin", base, cwd=worktree)
         try:
             self.git("merge-base", "--is-ancestor", f"origin/{base}", "HEAD", cwd=worktree)
             return False
@@ -153,7 +176,8 @@ class GitManager:
 
     def rebase_onto_base(self, worktree: Path, base: str) -> bool:
         """Rebase HEAD onto a freshly fetched origin/<base>; on conflict abort and return False."""
-        self.git("fetch", "origin", base, cwd=worktree)
+        with self._locked(worktree):
+            self.git("fetch", "origin", base, cwd=worktree)
         try:
             self.git("rebase", f"origin/{base}", cwd=worktree)
             return True
@@ -166,7 +190,8 @@ class GitManager:
 
     def force_push(self, worktree: Path, branch: str) -> None:
         """orq's own push after a rebase; the implementer never gets to do this (guard rule git_force_push)."""
-        self.git("push", "--force-with-lease", "origin", branch, cwd=worktree)
+        with self._locked(worktree):
+            self.git("push", "--force-with-lease", "origin", branch, cwd=worktree)
 
     def pr_number(self, worktree: Path, head: str) -> int | None:
         try:
@@ -181,7 +206,8 @@ class GitManager:
     def merge_pr(self, worktree: Path, number: int, strategy: str = "squash") -> None:
         if strategy not in ("squash", "merge", "rebase"):
             raise GitError(f"unknown merge strategy {strategy}")
-        self._gh(["pr", "merge", str(number), f"--{strategy}", "--delete-branch"], worktree)
+        with self._locked(worktree):  # gh updates the local remote-tracking refs as well
+            self._gh(["pr", "merge", str(number), f"--{strategy}", "--delete-branch"], worktree)
 
     def pr_url(self, worktree: Path, head: str) -> str | None:
         """URL of the open PR for `head`, or None when there is none (a resumed finalize must not open a second PR)."""
