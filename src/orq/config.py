@@ -75,6 +75,24 @@ class MergeConfig:
 
 
 @dataclass
+class NotifyConfig:
+    """Toast and WhatsApp via n8n (SPEC 9.3, 9.4). The token lives in the environment, never here."""
+
+    toast: bool = True
+    n8n_base_url: str = ""                 # empty disables WhatsApp
+    n8n_token_env: str = "ORQ_N8N_TOKEN"
+    poll_seconds: float = 20               # inbound replies poll (hub)
+    outbox_poll_seconds: float = 5         # new decisions and run states to send (hub)
+    answer_poll_seconds: float = 3         # a waiting run re-reads SQLite this often
+    reminder_hours: float = 3
+
+
+@dataclass
+class DashboardConfig:
+    port: int = 8765                       # loopback only
+
+
+@dataclass
 class Config:
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     implementer: ImplementerConfig = field(default_factory=ImplementerConfig)
@@ -82,6 +100,8 @@ class Config:
     git: GitConfig = field(default_factory=GitConfig)
     guard: GuardConfig = field(default_factory=GuardConfig)
     merge: MergeConfig = field(default_factory=MergeConfig)
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
+    dashboard: DashboardConfig = field(default_factory=DashboardConfig)
 
 
 def load_config(path: Path) -> Config:

@@ -304,3 +304,52 @@ def test_status_shows_milestone_and_pr(home: OrqPaths) -> None:
 
     assert result.exit_code == 0, result.output
     assert "milestone 2/2: test it [mechanical]" in result.output and "pull/9" in result.output
+
+
+def test_answer_rejects_unknown_and_reports_live_run(home: OrqPaths) -> None:
+    import os
+    store, _ = seeded_run(home, pid=os.getpid())
+    store.add_decision(Decision(decision_id="DBBBB", run_id="RAAAAA", source="guard", decision_type="risk",
+                                question="Allow?", options=["approve", "deny"]))
+    result = CliRunner().invoke(app, ["answer", "DBBBB", "--approve"])
+    assert result.exit_code == 0 and "orq resume" not in result.output  # the run is alive and will pick it up
+
+
+def test_run_waits_for_an_answer_from_another_channel(home: OrqPaths, origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+    import time
+
+    from orq.core.answers import record_answer
+
+    home.config.write_text(f'[git]\nworktree_root = "{(tmp_path / "wt").as_posix()}"\n[merge]\npoll_seconds = 0.05\n'
+                           '[notify]\nanswer_poll_seconds = 0.1\n', encoding="utf-8")
+    task = tmp_path / "TASK.md"
+    task.write_text(TASK, encoding="utf-8")
+    py = sys.executable
+    monkeypatch.setenv("ORQ_CLAUDE_EXE", f"{py} {FAKES / 'fake_claude.py'}")
+    monkeypatch.setenv("ORQ_CODEX_CMD", f"{py} {FAKES / 'fake_codex.py'}")
+    monkeypatch.setenv("ORQ_GH_CMD", f"{py} {FAKES / 'fake_gh.py'}")
+    monkeypatch.setenv("FAKE_RECORD", str(tmp_path / "rec.json"))
+    monkeypatch.setenv("FAKE_GH_RECORD", str(tmp_path / "gh.jsonl"))
+    monkeypatch.setenv("FAKE_SCENARIO", "denied")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "done")
+
+    def remote_owner() -> None:
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            store = Store(home.db)
+            runs = store.list_runs()
+            pending = store.pending_decisions(runs[0].run_id) if runs else []
+            if pending:
+                record_answer(store, home, pending[0].decision_id, "deny", via="dashboard")
+                os.environ["FAKE_SCENARIO"] = "ok"
+                return
+            time.sleep(0.1)
+
+    import os
+    threading.Thread(target=remote_owner, daemon=True).start()
+    result = CliRunner().invoke(app, ["run", str(task), "--clone-url", str(origin)])
+
+    assert result.exit_code == 0, result.output
+    assert "answered via dashboard: deny" in result.output
+    assert Store(home.db).list_runs()[0].state is RunState.DONE

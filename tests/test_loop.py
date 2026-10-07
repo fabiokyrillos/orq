@@ -135,19 +135,19 @@ def env(tmp_path: Path, origin: Path):
             raise GitError("no pull requests found")
         return "https://github.com/owner/sandbox/pull/1\n"
 
-    def make(implementer, reviewer, scanner=None, human=lambda d: "0", task_text=TASK, resume=None, planner=None, ci=None):
-        """human=None means headless: a decision stops the process instead of prompting."""
+    def make(implementer, reviewer, scanner=None, human=lambda d: "0", task_text=TASK, resume=None, planner=None, ci=None, wait=False):
+        """human=None means headless: a decision stops the process (or, with wait=True, polls the store for an answer)."""
         store = Store(paths.db)
         planner = planner or FakePlanner([plan(("the whole task", "hard"))])
         ci = ci or FakeCi()
         if resume:
             return Runner.resume(run_id=resume, config=config, paths=paths, store=store, git=GitManager(gh=fake_gh),
                                  implementer=implementer, reviewer=reviewer, scanner=scanner or clean_scanner(), human=human,
-                                 planner=planner, ci=ci)
+                                 planner=planner, ci=ci, wait_for_answers=wait)
         return Runner(
             config=config, paths=paths, store=store, task=parse_task(task_text), task_text=task_text,
             git=GitManager(gh=fake_gh), implementer=implementer, reviewer=reviewer,
-            scanner=scanner or clean_scanner(), human=human, clone_url=str(origin), planner=planner, ci=ci,
+            scanner=scanner or clean_scanner(), human=human, clone_url=str(origin), planner=planner, ci=ci, wait_for_answers=wait,
         )
 
     return make, paths, pr_calls
@@ -918,3 +918,49 @@ def test_sandbox_complaint_with_failing_check_is_a_real_question(env) -> None:
     assert asyncio.run(runner.execute()) is RunState.AWAITING_HUMAN
     pending = runner.store.pending_decisions(runner.run_id)
     assert len(pending) == 1 and pending[0].source == "reviewer" and asked == []
+
+
+# Phase 4: waiting for answers from any channel
+
+
+def test_wait_for_answers_polls_the_store_until_answered(env, monkeypatch) -> None:
+    from orq.core.answers import record_answer
+    make, paths, _ = env
+    implementer = FakeImplementer([denied("git reset --hard"), ok()])
+    runner = make(implementer, FakeReviewer([review("continue", "go"), review("done", None)]), human=None, wait=True)
+    polls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        polls.append(seconds)
+        if len(polls) == 2:  # the owner answers from "another channel" during the second poll
+            pending = runner.store.pending_decisions(runner.run_id)[0]
+            record_answer(Store(paths.db), paths, pending.decision_id, "approve", via="whatsapp")
+
+    monkeypatch.setattr("orq.core.loop.asyncio.sleep", fake_sleep)
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert len(polls) == 2 and polls[0] == 3
+    events = gate_events(paths, runner.run_id)
+    applied = [e for e in events if e["type"] == "answer_applied"]
+    assert applied and applied[0]["via"] == "whatsapp"
+    assert "approved this action" in implementer.prompts[1]
+
+
+def test_wait_for_answers_honours_pause_flag(env, monkeypatch) -> None:
+    make, paths, _ = env
+    runner = make(FakeImplementer([denied("git reset --hard")]), FakeReviewer([]), human=None, wait=True)
+
+    async def fake_sleep(seconds: float) -> None:
+        (runner.rundir.path / "pause.requested").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("orq.core.loop.asyncio.sleep", fake_sleep)
+    assert asyncio.run(runner.execute()) is RunState.PAUSED
+    assert len(runner.store.pending_decisions(runner.run_id)) == 1  # still pending for later
+
+
+def test_terminal_callback_records_through_the_shared_recorder(env) -> None:
+    make, paths, _ = env
+    runner = make(FakeImplementer([denied("rm -rf x"), ok()]), FakeReviewer([review("continue", "go"), review("done", None)]), human=lambda d: "1")
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    answered = [e for e in gate_events(paths, runner.run_id) if e["type"] == "answer"]
+    assert answered and answered[0]["via"] == "terminal" and answered[0]["answer"] == "deny"

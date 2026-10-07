@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from orq.adapters.claude import ClaudeImplementer, ClaudeReviewer
 from orq.adapters.codex import CodexReviewer
 from orq.adapters.router import ReviewerRouter
 from orq.config import Config, load_config
+from orq.core.answers import AnswerError, record_answer
 from orq.core.checkpoint import Checkpoint
 from orq.core.loop import PAUSE_FLAG, ResumeError, Runner, SandboxError, implementer_system_prompt
 from orq.core.models import Decision, RunState
@@ -41,14 +44,31 @@ def main(
     """Local Claude Code <-> Codex orchestrator."""
 
 
-def _ask_in_terminal(decision: Decision) -> str:
-    typer.echo("")
-    typer.secho(f"[orq] {decision.decision_id} needs you ({decision.source}, {decision.decision_type})", fg=typer.colors.YELLOW, bold=True)
-    typer.echo(decision.question)
-    for index, option in enumerate(decision.options):
-        marker = " (recommended)" if decision.recommendation == index else ""
-        typer.echo(f"  {index}. {option}{marker}")
-    return typer.prompt("Reply with an option number or free text")
+def _terminal_answers(paths: OrqPaths, run_id: str) -> None:
+    """Daemon thread: whatever the owner types answers the run's pending decision, like `orq answer` would."""
+    store = Store(paths.db)
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            return
+        text = line.strip()
+        if not text:
+            continue
+        pending = store.pending_decisions(run_id)
+        if not pending:
+            typer.echo("(no pending decision right now)")
+            continue
+        try:
+            answered = record_answer(store, paths, pending[0].decision_id, text, via="terminal")
+            typer.echo(f"{answered.decision_id} answered: {answered.answer}")
+        except AnswerError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+
+
+def _start_terminal_thread(paths: OrqPaths, run_id: str) -> None:
+    if sys.stdin is None or not sys.stdin.isatty():
+        return
+    threading.Thread(target=_terminal_answers, args=(paths, run_id), daemon=True).start()
 
 
 def _build_reviewer(config: Config):
@@ -71,12 +91,12 @@ def _runner_parts(config: Config) -> dict:
     )
 
 
-def _resume_runner(run_id: str, *, human) -> Runner:
+def _resume_runner(run_id: str, *, wait_for_answers: bool) -> Runner:
     paths = OrqPaths.from_env()
     config = load_config(paths.config)
     try:
-        return Runner.resume(run_id=run_id, config=config, paths=paths, store=Store(paths.db), human=human, printer=typer.echo,
-                             **_runner_parts(config))
+        return Runner.resume(run_id=run_id, config=config, paths=paths, store=Store(paths.db), human=None, printer=typer.echo,
+                             wait_for_answers=wait_for_answers, **_runner_parts(config))
     except (ResumeError, SandboxError, TaskError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1)
@@ -95,9 +115,9 @@ def _checkpoint_or_exit(run_id: str) -> tuple[OrqPaths, Checkpoint]:
 def run(
     task_file: Path = typer.Argument(..., exists=True, readable=True, help="Path to TASK.md"),
     clone_url: str | None = typer.Option(None, "--clone-url", hidden=True, help="Override the clone URL (tests)."),
-    no_prompt: bool = typer.Option(False, "--no-prompt", help="Headless: stop at the first decision instead of asking in the terminal."),
+    no_prompt: bool = typer.Option(False, "--no-prompt", help="Exit at the first decision instead of waiting for an answer."),
 ) -> None:
-    """Run a task from TASK.md until a PR is open or the owner is needed."""
+    """Run a task from TASK.md to a merged PR. Decisions are answered here, in the dashboard, on WhatsApp or with `orq answer`."""
     paths = OrqPaths.from_env()
     config = load_config(paths.config)
     task_text = task_file.read_text(encoding="utf-8")
@@ -107,13 +127,15 @@ def run(
         typer.secho(f"TASK.md invalid: {exc}", fg=typer.colors.RED)
         raise typer.Exit(1)
     try:
-        runner = Runner(config=config, paths=paths, store=Store(paths.db), task=task, task_text=task_text,
-                        human=None if no_prompt else _ask_in_terminal, clone_url=clone_url, printer=typer.echo, **_runner_parts(config))
+        runner = Runner(config=config, paths=paths, store=Store(paths.db), task=task, task_text=task_text, human=None,
+                        wait_for_answers=not no_prompt, clone_url=clone_url, printer=typer.echo, **_runner_parts(config))
     except SandboxError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1)
     typer.echo(f"run {runner.run_id}: {task.title} on {task.repo} (branch {runner.branch})")
     typer.echo(f"run dir: {runner.rundir.path}")
+    if not no_prompt:
+        _start_terminal_thread(paths, runner.run_id)
     final = asyncio.run(runner.execute())
     if final is not RunState.DONE:
         raise typer.Exit(1)
@@ -122,11 +144,13 @@ def run(
 @app.command()
 def resume(
     run_id: str,
-    no_prompt: bool = typer.Option(False, "--no-prompt", help="Headless: stop at the next decision instead of asking in the terminal."),
+    no_prompt: bool = typer.Option(False, "--no-prompt", help="Exit at the next decision instead of waiting for an answer."),
 ) -> None:
     """Continue a paused, crashed or answered run from its last checkpoint."""
-    runner = _resume_runner(run_id, human=None if no_prompt else _ask_in_terminal)
+    runner = _resume_runner(run_id, wait_for_answers=not no_prompt)
     typer.echo(f"resuming {run_id} at phase {runner.cp.phase}, iteration {runner.cp.iteration}")
+    if not no_prompt:
+        _start_terminal_thread(OrqPaths.from_env(), run_id)
     final = asyncio.run(runner.execute())
     if final is not RunState.DONE:
         raise typer.Exit(1)
@@ -144,22 +168,15 @@ def answer(
         typer.secho("give exactly one of: a text answer, --approve, --deny", fg=typer.colors.RED)
         raise typer.Exit(1)
     paths = OrqPaths.from_env()
-    store = Store(paths.db)
-    decision = store.get_decision(decision_id)
-    if decision is None:
-        typer.secho(f"no decision {decision_id}", fg=typer.colors.RED)
+    value = "approve" if approve else "deny" if deny else str(text)
+    try:
+        decision = record_answer(Store(paths.db), paths, decision_id, value, via="cli")
+    except AnswerError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1)
-    if decision.status != "pending":
-        typer.secho(f"{decision_id} already answered: {decision.answer}", fg=typer.colors.RED)
-        raise typer.Exit(1)
-    value = "approve" if approve else "deny" if deny else str(text).strip()
-    if value.isdigit() and decision.options and 0 <= int(value) < len(decision.options):
-        value = decision.options[int(value)]  # same shorthand as the terminal prompt
-    store.answer_decision(decision_id, answer=value, answered_via="cli")
-    rundir = RunDir(paths.run_dir(decision.run_id))
-    rundir.append_decision(decision_id, decision.question, value)
-    rundir.event("answer", decision_id=decision_id, answer=value, via="cli")
-    typer.echo(f"{decision_id} answered: {value}. Run `orq resume {decision.run_id}` to continue.")
+    cp = Checkpoint.load(paths.run_dir(decision.run_id) / "state.json")
+    hint = "" if cp and pid_alive(cp.pid) else f" Run `orq resume {decision.run_id}` to continue."
+    typer.echo(f"{decision_id} answered: {decision.answer}.{hint}")
 
 
 @app.command()
@@ -194,7 +211,7 @@ def abort(run_id: str) -> None:
 @app.command()
 def rollback(run_id: str, to: int = typer.Option(..., "--to", help="Iteration to roll back to (0 = base commit).")) -> None:
     """Reset a stopped run's worktree to an earlier iteration; `orq resume` then continues from there."""
-    runner = _resume_runner(run_id, human=None)
+    runner = _resume_runner(run_id, wait_for_answers=False)
     try:
         runner.rollback_cli(to)
     except ValueError as exc:

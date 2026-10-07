@@ -68,3 +68,12 @@ def test_merge_section_defaults_and_override(tmp_path: Path) -> None:
     config = load_config(path)
     assert config.merge.ci_timeout_minutes == 5 and config.merge.poll_seconds == 20
     assert config.merge.ci_grace_minutes == 5 and config.merge.max_ci_reruns == 3 and config.merge.max_gate_rounds == 3
+
+
+def test_notify_and_dashboard_sections(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[notify]\nn8n_base_url = "https://vps.example/webhook"\nreminder_hours = 1\n[dashboard]\nport = 9000\n', encoding="utf-8")
+    config = load_config(path)
+    assert config.notify.n8n_base_url == "https://vps.example/webhook" and config.notify.reminder_hours == 1
+    assert config.notify.n8n_token_env == "ORQ_N8N_TOKEN" and config.notify.answer_poll_seconds == 3 and config.notify.toast is True
+    assert config.dashboard.port == 9000

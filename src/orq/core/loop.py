@@ -20,6 +20,7 @@ from pathlib import Path
 from orq.adapters.base import Agent, AgentResult
 from orq.adapters.schema import PLAN_CONTRACT, REVIEW_CONTRACT, validate_plan, validate_review
 from orq.config import Config
+from orq.core.answers import record_answer
 from orq.core.checkpoint import Checkpoint
 from orq.core.hygiene import drop_orchestrator_milestones, review_complains_about_sandbox, strip_sandbox_complaints
 from orq.core.models import Decision, RunRecord, RunState, new_decision_id, new_run_id
@@ -75,7 +76,8 @@ class Runner:
     def __init__(self, *, config: Config, paths: OrqPaths, store: Store, task: Task, task_text: str,
                  git: GitManager, implementer: Agent, reviewer: Agent, scanner: SecretScanner, human: HumanInput | None,
                  clone_url: str | None = None, printer: Printer = print, run_id: str | None = None,
-                 checkpoint: Checkpoint | None = None, planner: Agent | None = None, ci: CiWatcher | None = None) -> None:
+                 checkpoint: Checkpoint | None = None, planner: Agent | None = None, ci: CiWatcher | None = None,
+                 wait_for_answers: bool = False) -> None:
         if config.git.sandbox_repos and task.repo not in config.git.sandbox_repos:
             raise SandboxError(f"{task.repo} is not listed in [git].sandbox_repos (empty list allows any repo)")
         self.config, self.paths, self.store, self.task = config, paths, store, task
@@ -84,6 +86,8 @@ class Runner:
         self.ci = ci or CiWatcher(git.gh, poll_seconds=config.merge.poll_seconds, timeout_minutes=config.merge.ci_timeout_minutes,
                                   grace_minutes=config.merge.ci_grace_minutes, max_reruns=config.merge.max_ci_reruns)
         self.human, self.clone_url, self.print = human, clone_url, printer
+        # No callback and wait_for_answers: block on SQLite until some channel answers (terminal thread, dashboard, WhatsApp).
+        self.wait_for_answers = wait_for_answers
         self._resumed_at = time.monotonic()
         if checkpoint is None:
             self.run_id = run_id or new_run_id()
@@ -116,7 +120,7 @@ class Runner:
     @classmethod
     def resume(cls, *, run_id: str, config: Config, paths: OrqPaths, store: Store, git: GitManager, implementer: Agent,
                reviewer: Agent, scanner: SecretScanner, human: HumanInput | None, printer: Printer = print,
-               planner: Agent | None = None, ci: CiWatcher | None = None) -> Runner:
+               planner: Agent | None = None, ci: CiWatcher | None = None, wait_for_answers: bool = False) -> Runner:
         """Rebuild a Runner from state.json. Refuses live runs, finished runs and worktrees that moved."""
         rundir = RunDir(paths.run_dir(run_id))
         cp = Checkpoint.load(rundir.path / "state.json")
@@ -156,7 +160,8 @@ class Runner:
         (rundir.path / PAUSE_FLAG).unlink(missing_ok=True)
         rundir.event("resume", phase=cp.phase, iteration=cp.iteration, state=cp.state)
         return cls(config=config, paths=paths, store=store, task=task, task_text=task_text, git=git, implementer=implementer,
-                   reviewer=reviewer, scanner=scanner, human=human, printer=printer, checkpoint=cp, planner=planner, ci=ci)
+                   reviewer=reviewer, scanner=scanner, human=human, printer=printer, checkpoint=cp, planner=planner, ci=ci,
+                   wait_for_answers=wait_for_answers)
 
     # persistence
 
@@ -199,7 +204,7 @@ class Runner:
                 elif phase == "review":
                     await self._review()
                 elif phase == "await":
-                    self._await()
+                    await self._await()
                 elif phase == "finalize":
                     self._finalize()
                 elif phase == "gate_ci":
@@ -676,7 +681,7 @@ class Runner:
         self.cp.phase = "await"
         self._transition(state, decision_id=decision.decision_id)
 
-    def _await(self) -> None:
+    async def _await(self) -> None:
         pending = self.cp.pending_decision
         if not pending:
             raise _Stop(RunState.FAILED, "await phase without a pending decision")
@@ -684,20 +689,33 @@ class Runner:
         if decision is None:
             raise _Stop(RunState.FAILED, f"decision {pending['decision_id']} missing from the store")
         if decision.status == "answered":
-            # Answered out of process (`orq answer`); that command already logged the `answer` event.
+            # Answered out of process (`orq answer`, dashboard, WhatsApp); the recorder already logged the `answer` event.
             self.rundir.event("answer_applied", decision_id=decision.decision_id, answer=decision.answer)
+        elif self.human is not None:
+            decision = record_answer(self.store, self.paths, decision.decision_id, self.human(decision), via="terminal")
+        elif self.wait_for_answers:
+            self._print_decision(decision)
+            while decision.status != "answered":
+                if (self.rundir.path / PAUSE_FLAG).exists():
+                    raise _Stop(RunState.PAUSED, "pause requested by the owner while waiting for an answer")
+                await asyncio.sleep(self.config.notify.answer_poll_seconds)
+                decision = self.store.get_decision(decision.decision_id) or decision
+            self.rundir.event("answer_applied", decision_id=decision.decision_id, answer=decision.answer, via=decision.answered_via)
+            self.print(f"[{self.run_id}] {decision.decision_id} answered via {decision.answered_via}: {decision.answer}")
         else:
-            if self.human is None:
-                self.print(f"[{self.run_id}] waiting for: orq answer {decision.decision_id} ...")
-                raise _Stop(RunState.AWAITING_HUMAN, "decision pending")
-            raw = self.human(decision).strip()
-            answer = decision.options[int(raw)] if raw.isdigit() and decision.options and 0 <= int(raw) < len(decision.options) else raw
-            self.store.answer_decision(decision.decision_id, answer=answer, answered_via="cli")
-            self.rundir.append_decision(decision.decision_id, decision.question, answer)
-            self.rundir.event("answer", decision_id=decision.decision_id, answer=answer, via="terminal")
-            decision = self.store.get_decision(decision.decision_id)
+            self.print(f"[{self.run_id}] waiting for: orq answer {decision.decision_id} ...")
+            raise _Stop(RunState.AWAITING_HUMAN, "decision pending")
         self.cp.pending_decision = None
         self._apply_answer(pending["kind"], pending.get("payload") or {}, decision.answer or "")
+
+    def _print_decision(self, decision: Decision) -> None:
+        self.print(f"[{self.run_id}] {decision.decision_id} needs you ({decision.source}, {decision.decision_type}):")
+        self.print(decision.question)
+        for index, option in enumerate(decision.options):
+            marker = " (recommended)" if decision.recommendation == index else ""
+            self.print(f"  {index}. {option}{marker}")
+        self.print("Type an option number or text here, use the dashboard or WhatsApp, or `orq answer "
+                   f"{decision.decision_id} ...` from another terminal.")
 
     def _apply_answer(self, kind: str, payload: dict, answer: str) -> None:
         a = answer.strip().lower()
