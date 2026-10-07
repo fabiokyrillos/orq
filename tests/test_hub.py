@@ -242,3 +242,10 @@ def test_inbound_errors_do_not_stop_the_loop(home: OrqPaths) -> None:
     t = tasks(home, store, fake)
     with pytest.raises(RuntimeError):
         t.inbound_once()  # the loop wrapper swallows this; the unit returns the error for visibility
+
+
+def test_outbound_skips_decisions_of_finished_runs(home: OrqPaths) -> None:
+    store = seed(home, state=RunState.ABORTED, phase="done", decision=business())
+    fake = FakeClient()
+    t = tasks(home, store, fake)
+    assert t.outbound_once() == 0 and fake.sent == []

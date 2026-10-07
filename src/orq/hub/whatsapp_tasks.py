@@ -38,6 +38,10 @@ class WhatsAppTasks:
             if run.state in TERMINAL and self.store.notified_at("run_state", f"{run.run_id}:{run.state.value}", CHANNEL) is None:
                 self.store.mark_notified("run_state", f"{run.run_id}:{run.state.value}", CHANNEL)
 
+    def _run_is_live(self, run_id: str) -> bool:
+        run = self.store.get_run(run_id)
+        return run is not None and run.state not in TERMINAL
+
     # outbound
 
     async def outbound_loop(self) -> None:
@@ -52,6 +56,8 @@ class WhatsAppTasks:
         sent = 0
         reminder_seconds = self.config.notify.reminder_hours * 3600
         for decision in self.store.all_pending_decisions():
+            if not self._run_is_live(decision.run_id):
+                continue  # left behind by an aborted or failed run; nobody can act on it
             last = self.store.notified_at("decision", decision.decision_id, CHANNEL)
             if last is not None and self._clock() - last < reminder_seconds:
                 continue
