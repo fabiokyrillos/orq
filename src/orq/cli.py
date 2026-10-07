@@ -238,6 +238,7 @@ def dashboard(port: int | None = typer.Option(None, "--port", help="Override [da
     whatsapp = WhatsAppClient.from_config(config)
     typer.echo("WhatsApp: " + ("on" if whatsapp else f"off (set [notify].n8n_base_url and the {config.notify.n8n_token_env} variable)"))
     chosen = port or config.dashboard.port
+    config.dashboard.port = chosen  # the hub only answers requests addressed to this port (Host check)
     typer.echo(f"dashboard: http://127.0.0.1:{chosen}/")
     uvicorn.run(create_app(paths, config, whatsapp=whatsapp), host="127.0.0.1", port=chosen, log_level="warning")
 

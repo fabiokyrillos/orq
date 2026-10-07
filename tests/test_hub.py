@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from orq.config import Config
 from orq.core.checkpoint import Checkpoint
 from orq.core.models import Decision, RunRecord, RunState
+from orq.git.manager import GitError, GitManager
 from orq.hub.app import condense_stream_line, create_app
 from orq.hub.whatsapp_tasks import WhatsAppTasks
 from orq.notify.whatsapp import InboundMessage
@@ -79,8 +80,19 @@ def destructive() -> Decision:
                     question="The implementer tried: rm -rf build. Allow it once?", options=["approve", "deny"], recommendation=1)
 
 
-def client(paths: OrqPaths, whatsapp=None) -> TestClient:
-    return TestClient(create_app(paths, Config(), whatsapp=whatsapp, start_tasks=False))
+def fake_git() -> GitManager:
+    def gh(args: list[str], cwd: Path) -> str:
+        if args[:2] == ["repo", "view"]:
+            if args[2] == "owner/missing":
+                raise GitError("gh repo view failed (1): Could not resolve to a Repository")
+            return json.dumps({"nameWithOwner": args[2], "defaultBranchRef": {"name": "main"}})
+        raise AssertionError(args)
+    return GitManager(gh=gh)
+
+
+def client(paths: OrqPaths, whatsapp=None, config: Config | None = None, token: bool = True) -> TestClient:
+    app = create_app(paths, config or Config(), whatsapp=whatsapp, start_tasks=False, git=fake_git(), allowed_hosts={"testserver"})
+    return TestClient(app, headers={"X-Orq-Token": app.state.token} if token else {})
 
 
 # API
@@ -99,8 +111,10 @@ def test_runs_and_detail(home: OrqPaths) -> None:
 
 def test_index_serves_ui(home: OrqPaths) -> None:
     seed(home)
-    html = client(home).get("/").text
-    assert "<title>orq</title>" in html and "EventSource" in html
+    c = client(home)
+    html = c.get("/").text
+    assert "<title>orq</title>" in html and "/static/app.js" in html and "__ORQ_TOKEN__" not in html
+    assert "EventSource" in c.get("/static/app.js").text and "--accent" in c.get("/static/style.css").text
 
 
 def test_answer_endpoint_records_via_dashboard(home: OrqPaths) -> None:
@@ -249,3 +263,126 @@ def test_outbound_skips_decisions_of_finished_runs(home: OrqPaths) -> None:
     fake = FakeClient()
     t = tasks(home, store, fake)
     assert t.outbound_once() == 0 and fake.sent == []
+
+
+# Phase 5: hardening, projects, tasks, queue, summary, replay
+
+TASK_MD = """# Task: Add greeting
+## Repo
+owner/a, base branch main
+## Goal
+Add greeting.txt.
+## Acceptance criteria
+- [ ] greeting.txt exists
+## Check command
+python -c "print('ok')"
+## Plan approval
+skip
+"""
+
+FIELDS = {"title": "Add greeting", "goal": "Add greeting.txt.", "acceptance_criteria": ["greeting.txt exists"],
+          "out_of_scope": [], "constraints": [], "check_command": "", "base_branch": "", "plan_approval": "skip"}
+
+
+def test_posts_need_the_token_and_hosts_are_checked(home: OrqPaths) -> None:
+    seed(home)
+    app = create_app(home, Config(), start_tasks=False, allowed_hosts={"127.0.0.1:8765"})
+    page = TestClient(app, base_url="http://127.0.0.1:8765").get("/").text
+    assert app.state.token in page and len(app.state.token) >= 32
+
+    bare = TestClient(app, base_url="http://127.0.0.1:8765")
+    assert bare.post("/api/runs/RAAAAA/pause").status_code == 403
+    assert bare.post("/api/runs/RAAAAA/pause", headers={"X-Orq-Token": "wrong"}).status_code == 403
+    assert bare.get("/api/runs").status_code == 200
+    rebound = TestClient(app, base_url="http://evil.example:8765")
+    assert rebound.get("/api/runs").status_code == 403
+
+
+def test_projects_list_add_and_update(home: OrqPaths) -> None:
+    seed(home)  # a run of owner/sandbox registers that project
+    c = client(home)
+
+    added = c.post("/api/projects", json={"source": "owner/a", "check_command": "uv run pytest -q"})
+    assert added.status_code == 200 and added.json()["repo"] == "owner/a"
+    assert c.post("/api/projects", json={"source": "owner/missing"}).status_code == 400
+    assert c.patch("/api/projects/owner/a", json={"max_concurrent": 2, "name": "A"}).json()["max_concurrent"] == 2
+
+    projects = {p["repo"]: p for p in c.get("/api/projects").json()}
+    assert projects["owner/a"]["name"] == "A" and projects["owner/a"]["effective_max_concurrent"] == 2
+    assert projects["owner/sandbox"]["counts"]["waiting"] == 1 and projects["owner/sandbox"]["effective_max_concurrent"] == 1
+    assert c.patch("/api/projects/owner/nope", json={"name": "x"}).status_code == 404
+
+
+def test_runs_filter_by_project(home: OrqPaths) -> None:
+    seed(home)
+    c = client(home)
+    assert [r["run_id"] for r in c.get("/api/runs?project=owner/sandbox").json()] == ["RAAAAA"]
+    assert c.get("/api/runs?project=owner/other").json() == []
+
+
+def test_task_preview_and_create_from_fields_and_markdown(home: OrqPaths) -> None:
+    c = client(home)
+    c.post("/api/projects", json={"source": "owner/a", "check_command": "uv run pytest -q"})
+
+    preview = c.post("/api/tasks/preview", json={"project": "owner/a", "fields": FIELDS}).json()
+    assert preview["errors"] == [] and "owner/a, base branch main" in preview["markdown"]
+    assert "uv run pytest -q" in preview["markdown"]  # the project's check command fills an empty field
+    bad = c.post("/api/tasks/preview", json={"project": "owner/a", "fields": {**FIELDS, "acceptance_criteria": []}}).json()
+    assert bad["errors"]
+
+    created = c.post("/api/tasks", json={"project": "owner/a", "fields": FIELDS})
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+    assert Store(home.db).get_run(run_id).state is RunState.QUEUED
+
+    from_md = c.post("/api/tasks", json={"project": "owner/a", "markdown": TASK_MD})
+    assert from_md.status_code == 200
+    c.post("/api/projects", json={"source": "owner/b"})
+    wrong_repo = c.post("/api/tasks", json={"project": "owner/b", "markdown": TASK_MD})
+    assert wrong_repo.status_code == 400 and "owner/a" in wrong_repo.json()["error"]
+    assert c.post("/api/tasks", json={"project": "owner/a", "fields": {**FIELDS, "title": ""}}).status_code == 400
+
+
+def test_rerun_and_queue_view(home: OrqPaths) -> None:
+    seed(home)
+    c = client(home)
+    assert c.post("/api/runs/RAAAAA/rerun").status_code == 400  # the seeded TASK.md is not a valid task
+    task_text = TASK_MD.replace("owner/a", "owner/sandbox")
+    (home.run_dir("RAAAAA") / "TASK.md").write_text(task_text, encoding="utf-8")
+
+    rerun = c.post("/api/runs/RAAAAA/rerun")
+    assert rerun.status_code == 200
+    new_id = rerun.json()["run_id"]
+    assert (home.run_dir(new_id) / "TASK.md").read_text(encoding="utf-8") == task_text
+    queue = c.get("/api/queue").json()
+    assert queue["limit"] == 2 and queue["held"] == 0 and [r["run_id"] for r in queue["queued"]] == [new_id]
+
+
+def test_summary_replay_and_artifacts(home: OrqPaths) -> None:
+    seed(home)
+    c = client(home)
+
+    summary = c.get("/api/runs/RAAAAA/summary").json()
+    assert summary["run_id"] == "RAAAAA" and summary["iterations"] == 2
+    replay = c.get("/api/runs/RAAAAA/replay").json()
+    assert [s["label"] for s in replay["steps"]] == ["Plan", "Iteration 1"]
+    art = c.get("/api/runs/RAAAAA/artifact", params={"path": "iterations/2/implementer.stream.jsonl"}).json()
+    assert "Working on it" in art["text"] and "[Bash] ls" in art["text"]  # condensed like the live pane
+    assert c.get("/api/runs/RAAAAA/artifact", params={"path": "TASK.md"}).json()["text"].startswith("# Task")
+    assert c.get("/api/runs/RAAAAA/artifact", params={"path": "../../orq.db"}).status_code == 400
+    assert c.get("/api/runs/RAAAAA/artifact", params={"path": "nope.txt"}).status_code == 404
+    assert c.get("/api/runs/RNOPE1/summary").status_code == 404
+
+
+def test_reviewer_messages_are_condensed_to_their_summary() -> None:
+    message = json.dumps({"status": "continue", "summary": "Tests are missing.", "milestone": "m1", "next_prompt": "add tests",
+                          "issues": [], "human": None})
+    line = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": message}})
+    assert condense_stream_line(line) == "[continue] Tests are missing."
+
+
+def test_finished_runs_show_no_pending_decisions(home: OrqPaths) -> None:
+    seed(home, state=RunState.ABORTED, phase="done", decision=business())  # left pending by a run aborted before Phase 5
+    c = client(home)
+    assert c.get("/api/runs").json()[0]["pending"] == 0
+    assert c.get("/api/runs/RAAAAA").json()["decisions"] == []

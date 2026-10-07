@@ -267,6 +267,11 @@ class Store:
         self._conn.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, value))
         self._conn.commit()
 
+    def expire_pending(self, run_id: str) -> None:
+        """A finished run's open questions can no longer be acted on."""
+        self._conn.execute("UPDATE decisions SET status = 'expired' WHERE run_id = ? AND status = 'pending'", (run_id,))
+        self._conn.commit()
+
     def answer_decision(self, decision_id: str, answer: str, answered_via: str) -> None:
         self._conn.execute(
             "UPDATE decisions SET status = 'answered', answer = ?, answered_via = ?, answered_at = ? WHERE decision_id = ?",

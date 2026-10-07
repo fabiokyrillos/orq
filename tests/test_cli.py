@@ -418,3 +418,11 @@ def test_queue_then_resume_runs_to_done(home: OrqPaths, origin: Path, tmp_path: 
     assert resumed.exit_code == 0, resumed.output
     assert Store(home.db).get_run(run_id).state is RunState.DONE
     assert Store(home.db).slot_usage() == []
+
+
+def test_abort_expires_pending_decisions(home: OrqPaths) -> None:
+    store, _ = seeded_run(home)
+    store.add_decision(Decision(decision_id="DCCCC", run_id="RAAAAA", source="reviewer", decision_type="risk", question="q?"))
+
+    assert CliRunner().invoke(app, ["abort", "RAAAAA"]).exit_code == 0
+    assert Store(home.db).get_decision("DCCCC").status == "expired"

@@ -1,13 +1,17 @@
-"""The hub: local dashboard (FastAPI + SSE) and owner of the WhatsApp channel (SPEC 5, 9, 14).
+"""The hub: local dashboard (FastAPI + SSE), queue dispatcher and owner of the WhatsApp channel (SPEC 5, 9, 14).
 
-Loopback only, no auth. Runs are separate processes; the hub reads their run dirs and SQLite and writes
-answers and control requests through the same functions the CLI uses.
+Loopback only. Runs are separate processes; the hub reads their run dirs and SQLite and writes answers, control
+requests and queued tasks through the same functions the CLI uses. Since the hub can start agents (Phase 5), every
+non-GET request needs the per-start token embedded in the page, and requests for any other Host are refused
+(DNS rebinding).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import secrets
+from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -15,13 +19,20 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from orq.config import Config
 from orq.core.answers import AnswerError, record_answer
 from orq.core.checkpoint import Checkpoint
 from orq.core.control import ControlError, abort_run, request_pause, spawn_resume
-from orq.core.models import Decision, RunRecord
+from orq.core.models import Decision, Project, RunRecord, RunState
+from orq.core.projects import ProjectError, add_project
+from orq.core.queue import QueueError, enqueue
+from orq.core.summary import build_replay, load_summary
+from orq.core.task import TaskError, parse_task
+from orq.core.taskfile import TaskFields, render_task
+from orq.git.manager import GitManager
 from orq.hub.dispatcher import Dispatcher
 from orq.hub.whatsapp_tasks import WhatsAppTasks
 from orq.notify.whatsapp import WhatsAppClient
@@ -30,16 +41,64 @@ from orq.store.db import Store
 
 STATIC = Path(__file__).with_name("static")
 STREAM_FILES = {"implementer": "implementer.stream.jsonl", "reviewer": "reviewer.stream.jsonl"}
+TOKEN_HEADER = "X-Orq-Token"
+TERMINAL = {RunState.DONE, RunState.FAILED, RunState.ABORTED}
+ARTIFACT_LIMIT = 400_000  # characters; longer files are cut to their tail
+STATE_GROUPS = {
+    "running": {RunState.PLANNING, RunState.IMPLEMENTING, RunState.VERIFYING, RunState.REVIEWING, RunState.FINALIZING,
+                RunState.PAUSED_RATE_LIMIT},
+    "waiting": {RunState.AWAITING_HUMAN, RunState.AWAITING_PLAN_APPROVAL, RunState.PAUSED},
+    "queued": {RunState.QUEUED},
+    "done": {RunState.DONE},
+    "failed": {RunState.FAILED, RunState.ABORTED},
+}
 
 
 class AnswerBody(BaseModel):
     answer: str
 
 
-def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | None = None, start_tasks: bool = True) -> FastAPI:
+class ProjectBody(BaseModel):
+    source: str
+    name: str | None = None
+    base_branch: str | None = None
+    check_command: str | None = None
+    max_concurrent: int | None = None
+
+
+class ProjectPatch(BaseModel):
+    name: str | None = None
+    base_branch: str | None = None
+    check_command: str | None = None
+    max_concurrent: int | None = None
+
+
+class FieldsBody(BaseModel):
+    title: str = ""
+    goal: str = ""
+    acceptance_criteria: list[str] = []
+    out_of_scope: list[str] = []
+    constraints: list[str] = []
+    check_command: str = ""
+    base_branch: str = ""
+    plan_approval: str = "required"
+
+
+class TaskBody(BaseModel):
+    project: str
+    fields: FieldsBody | None = None
+    markdown: str | None = None
+
+
+def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | None = None, start_tasks: bool = True,
+               git: GitManager | None = None, allowed_hosts: set[str] | None = None, token: str | None = None) -> FastAPI:
     store = Store(paths.db)
+    git = git or GitManager()
     tasks = WhatsAppTasks(store, paths, config, whatsapp) if whatsapp is not None else None
     dispatcher = Dispatcher(store, paths, config)
+    port = config.dashboard.port
+    hosts = allowed_hosts or {f"127.0.0.1:{port}", f"localhost:{port}"}
+    secret = token or secrets.token_urlsafe(32)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -56,14 +115,150 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
 
     app = FastAPI(title="orq", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.whatsapp = tasks
+    app.state.token = secret
+    app.state.dispatcher = dispatcher
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        if request.headers.get("host", "") not in hosts:
+            return JSONResponse({"error": "unknown host"}, status_code=403)
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not secrets.compare_digest(request.headers.get(TOKEN_HEADER, ""), secret):
+            return JSONResponse({"error": "missing or wrong request token; reload the page"}, status_code=403)
+        return await call_next(request)
+
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
-        return (STATIC / "index.html").read_text(encoding="utf-8")
+        return (STATIC / "index.html").read_text(encoding="utf-8").replace("__ORQ_TOKEN__", secret)
 
     @app.get("/api/runs")
-    async def runs() -> list[dict]:
-        return [run_summary(paths, store, run) for run in store.list_runs()]
+    async def runs(project: str | None = None) -> list[dict]:
+        return [run_summary(paths, store, run) for run in store.list_runs() if project is None or run.repo == project]
+
+    # projects
+
+    def project_dict(project: Project, counts: Counter | None = None) -> dict:
+        data = asdict(project)
+        data["effective_max_concurrent"] = project.max_concurrent or config.queue.project_concurrency
+        data["counts"] = {group: (counts or Counter())[group] for group in STATE_GROUPS}
+        return data
+
+    @app.get("/api/projects")
+    async def projects() -> list[dict]:
+        counts: dict[str, Counter] = {}
+        for run in store.list_runs():
+            group = next((g for g, members in STATE_GROUPS.items() if run.state in members), None)
+            if group:
+                counts.setdefault(run.repo, Counter())[group] += 1
+        return [project_dict(p, counts.get(p.repo)) for p in store.list_projects()]
+
+    @app.post("/api/projects")
+    async def create_project(body: ProjectBody) -> dict:
+        try:
+            project = await asyncio.to_thread(add_project, store, git, body.source, name=body.name, base_branch=body.base_branch,
+                                              check_command=body.check_command, max_concurrent=body.max_concurrent)
+        except ProjectError as exc:
+            raise HTTPException(400, str(exc))
+        return project_dict(project)
+
+    @app.patch("/api/projects/{owner}/{repo}")
+    async def patch_project(owner: str, repo: str, body: ProjectPatch) -> dict:
+        slug = f"{owner}/{repo}"
+        if store.get_project(slug) is None:
+            raise HTTPException(404, f"no project {slug}")
+        store.update_project(slug, **body.model_dump(exclude_unset=True))
+        return project_dict(store.get_project(slug))  # type: ignore[arg-type]
+
+    # tasks and queue
+
+    def task_text(body: TaskBody) -> str:
+        project = store.get_project(body.project)
+        if project is None:
+            raise HTTPException(400, f"no project {body.project}")
+        if body.markdown is not None:
+            return body.markdown
+        if body.fields is None:
+            raise HTTPException(400, "give fields or markdown")
+        f = body.fields
+        return render_task(TaskFields(
+            title=f.title, repo=project.repo, goal=f.goal, check_command=f.check_command or project.check_command,
+            base_branch=f.base_branch or project.base_branch, acceptance_criteria=f.acceptance_criteria,
+            out_of_scope=f.out_of_scope, constraints=f.constraints, plan_approval=f.plan_approval))
+
+    def validate(body: TaskBody, text: str) -> list[str]:
+        try:
+            task = parse_task(text)
+        except TaskError as exc:
+            return [str(exc)]
+        if task.repo != body.project:
+            return [f"the task names {task.repo} but the project is {body.project}"]
+        return []
+
+    @app.post("/api/tasks/preview")
+    async def preview_task(body: TaskBody) -> dict:
+        text = task_text(body)
+        return {"markdown": text, "errors": validate(body, text)}
+
+    @app.post("/api/tasks")
+    async def create_task(body: TaskBody) -> dict:
+        text = task_text(body)
+        errors = validate(body, text)
+        if errors:
+            raise HTTPException(400, "; ".join(errors))
+        try:
+            run_id = enqueue(paths, store, config, text)
+        except (TaskError, QueueError) as exc:
+            raise HTTPException(400, str(exc))
+        return {"run_id": run_id}
+
+    @app.post("/api/runs/{run_id}/rerun")
+    async def rerun(run_id: str) -> dict:
+        path = paths.run_dir(run_id) / "TASK.md"
+        if not path.exists():
+            raise HTTPException(404, f"no run {run_id}")
+        try:
+            new_id = enqueue(paths, store, config, path.read_text(encoding="utf-8"))
+        except (TaskError, QueueError) as exc:
+            raise HTTPException(400, f"cannot queue {run_id} again: {exc}")
+        return {"run_id": new_id}
+
+    @app.get("/api/queue")
+    async def queue() -> dict:
+        rows = store.slot_usage(alive=dispatcher._alive)
+        queued = [r for r in reversed(store.list_runs()) if r.state is RunState.QUEUED]
+        return {"limit": config.limits.max_concurrent_runs, "held": sum(1 for r in rows if r["held"]),
+                "slots": rows, "queued": [run_summary(paths, store, r) for r in queued]}
+
+    # summary and replay
+
+    def run_dir_or_404(run_id: str) -> Path:
+        run_dir = paths.run_dir(run_id)
+        if not run_dir.exists():
+            raise HTTPException(404, f"no run {run_id}")
+        return run_dir
+
+    @app.get("/api/runs/{run_id}/summary")
+    async def summary(run_id: str) -> dict:
+        return load_summary(run_dir_or_404(run_id))
+
+    @app.get("/api/runs/{run_id}/replay")
+    async def replay(run_id: str) -> dict:
+        return build_replay(run_dir_or_404(run_id))
+
+    @app.get("/api/runs/{run_id}/artifact")
+    async def artifact(run_id: str, path: str) -> dict:
+        run_dir = run_dir_or_404(run_id).resolve()
+        target = (run_dir / path).resolve()
+        if not target.is_relative_to(run_dir):
+            raise HTTPException(400, "path outside the run directory")
+        if not target.is_file():
+            raise HTTPException(404, f"no {path} in {run_id}")
+        text = target.read_text(encoding="utf-8", errors="replace")
+        if target.name.endswith(".stream.jsonl"):
+            text = "\n".join(line for line in map(condense_stream_line, text.splitlines(keepends=True)) if line)
+        truncated = len(text) > ARTIFACT_LIMIT
+        return {"path": path, "text": text[-ARTIFACT_LIMIT:], "truncated": truncated}
 
     @app.get("/api/runs/{run_id}")
     async def run_detail(run_id: str) -> dict:
@@ -74,7 +269,7 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
         detail = run_summary(paths, store, run)
         detail["plan"] = cp.plan if cp else None
         detail["phase"] = cp.phase if cp else None
-        detail["decisions"] = [decision_dict(d) for d in store.pending_decisions(run_id)]
+        detail["decisions"] = [decision_dict(d) for d in store.pending_decisions(run_id)] if run.state not in TERMINAL else []
         detail["whatsapp"] = tasks is not None
         return detail
 
@@ -146,7 +341,7 @@ def run_summary(paths: OrqPaths, store: Store, run: RunRecord) -> dict:
     return {
         "run_id": run.run_id, "repo": run.repo, "task_title": run.task_title, "branch": run.branch, "state": run.state.value,
         "iteration": run.iteration, "updated_at": run.updated_at, "created_at": run.created_at,
-        "pending": len(store.pending_decisions(run.run_id)), "milestone": milestone,
+        "pending": 0 if run.state in TERMINAL else len(store.pending_decisions(run.run_id)), "milestone": milestone,
         "pr_url": cp.pr_url if cp else None, "phase": cp.phase if cp else None,
     }
 
@@ -196,7 +391,7 @@ def condense_stream_line(line: str) -> str | None:
     if kind == "item.completed":  # Codex
         item = event.get("item") or {}
         if item.get("type") == "agent_message":
-            return item.get("text", "")[:2000]
+            return _schema_message(item.get("text", ""))
         if item.get("type") == "command_execution":
             return f"[exec] {item.get('command', '')[:160]}"
         if item.get("type") == "reasoning":
@@ -206,6 +401,19 @@ def condense_stream_line(line: str) -> str | None:
         usage = event.get("usage") or {}
         return f"[turn done] input {usage.get('input_tokens')} output {usage.get('output_tokens')}"
     return None
+
+
+def _schema_message(text: str) -> str:
+    """Codex forces every message into the reviewer or planner schema; show its status and summary, not the JSON."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return text[:2000]
+    if not isinstance(data, dict) or "summary" not in data:
+        return text[:2000]
+    line = f"[{data.get('status', '')}] {data['summary']}".strip()
+    question = (data.get("human") or {}).get("question")
+    return (line + (f"\nquestion: {question}" if question else ""))[:2000]
 
 
 async def sse_lines(path: Path, request: Request, *, follow: bool, condense) -> AsyncIterator[str]:

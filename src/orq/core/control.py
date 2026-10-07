@@ -56,7 +56,9 @@ def abort_run(paths: OrqPaths, run_id: str, *, git: GitManager | None = None) ->
     rundir = RunDir(paths.run_dir(run_id))
     cp.state, cp.phase = RunState.ABORTED.value, "done"
     cp.save(rundir.path / "state.json")
-    Store(paths.db).set_state(run_id, RunState.ABORTED)
+    store = Store(paths.db)
+    store.set_state(run_id, RunState.ABORTED)
+    store.expire_pending(run_id)
     rundir.event("state", state=RunState.ABORTED.value, reason="aborted by owner")
     write_summary(rundir.path)
     return warning

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 _REPO_RE = re.compile(r"^(?P<repo>[\w.-]+/[\w.-]+)(?:\s*,\s*base branch\s+(?P<base>\S+))?$")
 _BULLET_RE = re.compile(r"^\s*[-*]\s*(?:\[[ xX]\]\s*)?(.*\S)")
-_TITLE_RE = re.compile(r"^#\s*Task:\s*(.+\S)\s*$", re.MULTILINE)
+_TITLE_RE = re.compile(r"^#[ \t]*Task:[ \t]*(.*\S)[ \t]*$", re.MULTILINE)  # one line: an empty title must not swallow the next heading
 
 
 class TaskError(ValueError):
