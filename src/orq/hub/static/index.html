@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orq</title>
+<style>
+  :root { --bg: #111417; --panel: #1a1f24; --line: #2a3139; --text: #e6e9ec; --muted: #8b949e; --accent: #4cc2ff; --warn: #f0b429; --bad: #ff6b6b; --ok: #3fb950; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 ui-sans-serif, system-ui, Segoe UI, sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 16px; align-items: baseline; }
+  header h1 { font-size: 16px; margin: 0; }
+  header .muted { color: var(--muted); }
+  main { display: grid; grid-template-columns: 340px 1fr; min-height: calc(100vh - 42px); }
+  #runs { border-right: 1px solid var(--line); overflow: auto; }
+  .run { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .run:hover, .run.active { background: var(--panel); }
+  .run .id { font-family: ui-monospace, Consolas, monospace; color: var(--accent); }
+  .state { font-size: 11px; padding: 1px 6px; border-radius: 3px; background: var(--line); margin-left: 6px; }
+  .state.AWAITING_HUMAN, .state.AWAITING_PLAN_APPROVAL { background: var(--warn); color: #000; }
+  .state.DONE { background: var(--ok); color: #000; }
+  .state.FAILED, .state.ABORTED { background: var(--bad); color: #000; }
+  #detail { padding: 14px 16px; display: grid; grid-template-rows: auto auto 1fr; gap: 12px; min-width: 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+  .decision { border-left: 3px solid var(--warn); }
+  .decision.destructive { border-left-color: var(--bad); }
+  .decision .q { white-space: pre-wrap; margin: 6px 0 10px; }
+  button { background: var(--line); color: var(--text); border: 1px solid #3a434d; border-radius: 4px; padding: 5px 10px; cursor: pointer; margin: 2px 4px 2px 0; }
+  button:hover { border-color: var(--accent); }
+  button.danger { border-color: var(--bad); }
+  input[type=text] { background: #0d1013; color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; width: 60%; }
+  .streams { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-height: 0; }
+  .pane { display: flex; flex-direction: column; min-height: 320px; }
+  .pane h3 { margin: 0 0 6px; font-size: 13px; color: var(--muted); }
+  pre { flex: 1; margin: 0; overflow: auto; background: #0d1013; border: 1px solid var(--line); border-radius: 4px; padding: 8px; font: 12px/1.4 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; max-height: 60vh; }
+  #events { max-height: 180px; }
+  .muted { color: var(--muted); }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } .streams { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header><h1>orq</h1><span class="muted" id="clock"></span><span class="muted" id="wa"></span></header>
+<main>
+  <section id="runs"></section>
+  <section id="detail"><div class="card muted">Pick a run.</div></section>
+</main>
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+let current = null, sources = [];
+
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+async function loadRuns() {
+  const runs = await api('/api/runs');
+  $('#runs').innerHTML = runs.map(r => `
+    <div class="run ${r.run_id === current ? 'active' : ''}" data-id="${r.run_id}">
+      <div><span class="id">${r.run_id}</span><span class="state ${r.state}">${r.state}</span>${r.pending ? ' <b>needs you</b>' : ''}</div>
+      <div>${esc(r.task_title)}</div>
+      <div class="muted">${esc(r.repo)} · iter ${r.iteration}${r.milestone ? ` · milestone ${r.milestone.index}/${r.milestone.of}` : ''}${r.phase ? ` · ${r.phase}` : ''}</div>
+    </div>`).join('') || '<div class="run muted">no runs</div>';
+  document.querySelectorAll('.run[data-id]').forEach(el => el.onclick = () => open(el.dataset.id));
+  if (!current) { const needs = runs.find(r => r.pending) || runs[0]; if (needs) open(needs.run_id); }
+}
+
+function closeStreams() { sources.forEach(s => s.close()); sources = []; }
+
+function attach(url, pre) {
+  const es = new EventSource(url);
+  es.onmessage = e => { pre.textContent += e.data + '\n'; pre.scrollTop = pre.scrollHeight; };
+  es.onerror = () => {};
+  sources.push(es);
+}
+
+async function open(id) {
+  current = id; closeStreams();
+  const d = await api(`/api/runs/${id}`);
+  $('#wa').textContent = d.whatsapp ? 'WhatsApp on' : 'WhatsApp off (dashboard only)';
+  const decisions = d.decisions.map(x => `
+    <div class="card decision ${x.destructive ? 'destructive' : ''}" data-decision="${x.decision_id}">
+      <div><b>${x.decision_id}</b> <span class="muted">${esc(x.source)} · ${esc(x.decision_type)}${x.destructive ? ' · destructive' : ''}</span></div>
+      <div class="q">${esc(x.question)}</div>
+      <div>${x.options.map((o, i) => `<button data-answer="${esc(o)}" class="${x.destructive && o === 'deny' ? 'danger' : ''}">${i}. ${esc(o)}${x.recommendation === i ? ' ★' : ''}</button>`).join('')}</div>
+      <div style="margin-top:8px"><input type="text" placeholder="free text answer"><button data-send>Send</button></div>
+    </div>`).join('');
+  const plan = d.plan && d.plan.milestones ? `<div class="muted">plan: ${d.plan.milestones.map((m, i) => `${i + 1}. ${esc(m.title)} [${m.difficulty}]`).join(' · ')}</div>` : '';
+  $('#detail').innerHTML = `
+    <div class="card">
+      <div><span class="id" style="color:var(--accent)">${d.run_id}</span><span class="state ${d.state}">${d.state}</span> <b>${esc(d.task_title)}</b></div>
+      <div class="muted">${esc(d.repo)} · ${esc(d.branch)} · iteration ${d.iteration} · phase ${esc(d.phase)}${d.pr_url ? ` · <a style="color:var(--accent)" href="${d.pr_url}" target="_blank">PR</a>` : ''}</div>
+      ${plan}
+      <div style="margin-top:8px">
+        <button data-act="pause">Pause</button><button data-act="resume">Resume</button><button data-act="abort" class="danger">Abort</button>
+        <span class="muted" id="msg"></span>
+      </div>
+    </div>
+    ${decisions}
+    <div class="pane"><h3>events</h3><pre id="events"></pre></div>
+    <div class="streams">
+      <div class="pane"><h3>implementer (claude)</h3><pre id="impl"></pre></div>
+      <div class="pane"><h3>reviewer (codex)</h3><pre id="rev"></pre></div>
+    </div>`;
+  document.querySelectorAll('[data-act]').forEach(b => b.onclick = () => act(b.dataset.act));
+  document.querySelectorAll('.decision').forEach(card => {
+    const id = card.dataset.decision;
+    card.querySelectorAll('[data-answer]').forEach(b => b.onclick = () => answer(id, b.dataset.answer));
+    $('[data-send]', card).onclick = () => answer(id, $('input', card).value);
+  });
+  attach(`/api/runs/${id}/events`, $('#events'));
+  attach(`/api/runs/${id}/stream/implementer`, $('#impl'));
+  attach(`/api/runs/${id}/stream/reviewer`, $('#rev'));
+  loadRuns();
+}
+
+async function answer(id, text) {
+  if (!text) return;
+  try { await api(`/api/decisions/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer: text }) }); $('#msg').textContent = `${id} answered: ${text}`; }
+  catch (e) { $('#msg').textContent = e.message; }
+  setTimeout(() => open(current), 500);
+}
+
+async function act(what) {
+  try { const r = await api(`/api/runs/${current}/${what}`, { method: 'POST' }); $('#msg').textContent = `${what}: ok${r.pid ? ' (pid ' + r.pid + ')' : ''}${r.warning ? ' · ' + r.warning : ''}`; }
+  catch (e) { $('#msg').textContent = e.message; }
+  setTimeout(() => open(current), 800);
+}
+
+setInterval(() => { $('#clock').textContent = new Date().toLocaleTimeString(); loadRuns(); }, 5000);
+loadRuns();
+</script>
+</body>
+</html>

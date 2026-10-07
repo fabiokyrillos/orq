@@ -60,6 +60,14 @@ class Checkpoint:
         tmp.replace(path)
 
     @classmethod
+    def try_load(cls, path: Path) -> Checkpoint | None:
+        """For read-only views (dashboard, status): None instead of raising on a missing or pre-Phase-2 state.json."""
+        try:
+            return cls.load(path)
+        except (ValueError, TypeError, OSError):
+            return None
+
+    @classmethod
     def load(cls, path: Path) -> Checkpoint | None:
         if not path.exists():
             return None

@@ -351,5 +351,8 @@ def test_run_waits_for_an_answer_from_another_channel(home: OrqPaths, origin: Pa
     result = CliRunner().invoke(app, ["run", str(task), "--clone-url", str(origin)])
 
     assert result.exit_code == 0, result.output
-    assert "answered via dashboard: deny" in result.output
-    assert Store(home.db).list_runs()[0].state is RunState.DONE
+    run_id = Store(home.db).list_runs()[0].run_id
+    assert Store(home.db).get_run(run_id).state is RunState.DONE
+    events = [json.loads(l) for l in (home.run_dir(run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(e["type"] == "answer" and e["via"] == "dashboard" and e["answer"] == "deny" for e in events)
+    assert any(e["type"] == "decision" for e in events) and "AWAITING_HUMAN" in result.output

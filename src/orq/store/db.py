@@ -38,6 +38,17 @@ CREATE TABLE IF NOT EXISTS decisions (
     created_at TEXT NOT NULL,
     answered_at TEXT
 );
+CREATE TABLE IF NOT EXISTS notifications (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    sent_at REAL NOT NULL,
+    PRIMARY KEY (kind, key, channel)
+);
+CREATE TABLE IF NOT EXISTS kv (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -48,7 +59,7 @@ def _now() -> str:
 class Store:
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)  # the hub serves requests from worker threads
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
 
@@ -113,6 +124,30 @@ class Store:
             "SELECT * FROM decisions WHERE run_id = ? AND status = 'pending' ORDER BY created_at", (run_id,)
         ).fetchall()
         return [_decision_from_row(r) for r in rows]
+
+    def all_pending_decisions(self) -> list[Decision]:
+        rows = self._conn.execute("SELECT * FROM decisions WHERE status = 'pending' ORDER BY created_at").fetchall()
+        return [_decision_from_row(r) for r in rows]
+
+    # notifications (hub) and small key/value state
+
+    def notified_at(self, kind: str, key: str, channel: str) -> float | None:
+        row = self._conn.execute("SELECT sent_at FROM notifications WHERE kind = ? AND key = ? AND channel = ?", (kind, key, channel)).fetchone()
+        return float(row["sent_at"]) if row else None
+
+    def mark_notified(self, kind: str, key: str, channel: str, at: float | None = None) -> None:
+        import time as _time
+
+        self._conn.execute("INSERT OR REPLACE INTO notifications VALUES (?, ?, ?, ?)", (kind, key, channel, at if at is not None else _time.time()))
+        self._conn.commit()
+
+    def kv_get(self, key: str, default: str | None = None) -> str | None:
+        row = self._conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else default
+
+    def kv_set(self, key: str, value: str) -> None:
+        self._conn.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, value))
+        self._conn.commit()
 
     def answer_decision(self, decision_id: str, answer: str, answered_via: str) -> None:
         self._conn.execute(

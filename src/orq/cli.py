@@ -18,6 +18,7 @@ from orq.adapters.router import ReviewerRouter
 from orq.config import Config, load_config
 from orq.core.answers import AnswerError, record_answer
 from orq.core.checkpoint import Checkpoint
+from orq.core.control import ControlError, abort_run, request_pause
 from orq.core.loop import PAUSE_FLAG, ResumeError, Runner, SandboxError, implementer_system_prompt
 from orq.core.models import Decision, RunState
 from orq.core.procs import pid_alive
@@ -176,7 +177,7 @@ def answer(
     except AnswerError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1)
-    cp = Checkpoint.load(paths.run_dir(decision.run_id) / "state.json")
+    cp = Checkpoint.try_load(paths.run_dir(decision.run_id) / "state.json")
     hint = "" if cp and pid_alive(cp.pid) else f" Run `orq resume {decision.run_id}` to continue."
     typer.echo(f"{decision_id} answered: {decision.answer}.{hint}")
 
@@ -184,30 +185,43 @@ def answer(
 @app.command()
 def pause(run_id: str) -> None:
     """Ask a running run to stop between steps; `orq resume` continues it."""
-    paths, cp = _checkpoint_or_exit(run_id)
-    (paths.run_dir(run_id) / PAUSE_FLAG).write_text("", encoding="utf-8")
-    note = "" if pid_alive(cp.pid) else " (no live process; the run stays paused until `orq resume`)"
+    try:
+        live = request_pause(OrqPaths.from_env(), run_id)
+    except ControlError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1)
+    note = "" if live else " (no live process; the run stays paused until `orq resume`)"
     typer.echo(f"pause requested for {run_id}{note}")
 
 
 @app.command()
 def abort(run_id: str) -> None:
     """Mark a stopped run ABORTED and remove its worktree."""
-    paths, cp = _checkpoint_or_exit(run_id)
-    if pid_alive(cp.pid):
-        typer.secho(f"{run_id} is still running (pid {cp.pid}); `orq pause {run_id}` first", fg=typer.colors.RED)
+    try:
+        warning = abort_run(OrqPaths.from_env(), run_id)
+    except ControlError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1)
-    rundir = RunDir(paths.run_dir(run_id))
-    if cp.repo_path and Path(cp.worktree).exists():
-        try:
-            GitManager().remove_worktree(Path(cp.repo_path), Path(cp.worktree), branch=cp.branch)
-        except GitError as exc:
-            typer.secho(f"worktree not removed: {exc}", fg=typer.colors.YELLOW)
-    cp.state, cp.phase = RunState.ABORTED.value, "done"
-    cp.save(rundir.path / "state.json")
-    Store(paths.db).set_state(run_id, RunState.ABORTED)
-    rundir.event("state", state=RunState.ABORTED.value, reason="aborted by owner")
+    if warning:
+        typer.secho(warning, fg=typer.colors.YELLOW)
     typer.echo(f"{run_id} aborted")
+
+
+@app.command()
+def dashboard(port: int | None = typer.Option(None, "--port", help="Override [dashboard].port.")) -> None:
+    """Serve the local dashboard on 127.0.0.1 and own the WhatsApp channel while running."""
+    import uvicorn
+
+    from orq.hub.app import create_app
+    from orq.notify.whatsapp import WhatsAppClient
+
+    paths = OrqPaths.from_env()
+    config = load_config(paths.config)
+    whatsapp = WhatsAppClient.from_config(config)
+    typer.echo("WhatsApp: " + ("on" if whatsapp else f"off (set [notify].n8n_base_url and the {config.notify.n8n_token_env} variable)"))
+    chosen = port or config.dashboard.port
+    typer.echo(f"dashboard: http://127.0.0.1:{chosen}/")
+    uvicorn.run(create_app(paths, config, whatsapp=whatsapp), host="127.0.0.1", port=chosen, log_level="warning")
 
 
 @app.command()
@@ -241,7 +255,7 @@ def status(run_id: str | None = typer.Argument(None)) -> None:
         raise typer.Exit(1)
     typer.echo(f"{item.run_id}  {item.state.value}  iteration {item.iteration}")
     typer.echo(f"repo {item.repo}  branch {item.branch}\nworktree {item.worktree}\ntask {item.task_title}")
-    cp = Checkpoint.load(paths.run_dir(run_id) / "state.json")
+    cp = Checkpoint.try_load(paths.run_dir(run_id) / "state.json")
     if cp and cp.plan and cp.plan.get("milestones"):
         milestones = cp.plan["milestones"]
         index = min(cp.milestone_index, len(milestones) - 1)

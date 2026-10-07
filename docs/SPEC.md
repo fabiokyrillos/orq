@@ -74,9 +74,9 @@ Components:
 * **Guard:** Claude Code `PreToolUse` hook (pre execution) plus diff rules (post execution) plus secret scan.
 * **GitManager:** worktrees, branches, commits, rebase, PR and merge via `gh`.
 * **Verifier:** runs the task's local check command and reads GitHub Actions status.
-* **Notifier:** Windows toast plus WhatsApp via n8n.
+* **Notifier:** Windows toast plus WhatsApp via n8n. Phase 4: the toast is shown by the run process (`notify/toast.py`); WhatsApp belongs to the hub.
 * **Store:** SQLite for runs, queue, decisions; files for raw logs.
-* **Dashboard (Phase 4):** local web page with both live streams and decision controls.
+* **Hub / Dashboard (Phase 4, `orq dashboard`):** one long-lived FastAPI process on 127.0.0.1 that serves the dashboard (run list, both live streams over SSE, decision controls, pause/abort/resume) and owns the WhatsApp channel: it sends new decisions and run completions, reminds after `reminder_hours`, polls n8n for replies, applies them and acks. Runs never talk to n8n.
 
 Rejected alternatives (for the record):
 
@@ -209,6 +209,7 @@ One to eight ordered milestones; `milestones` is empty and `human` set when `sta
 * Answer is appended to the run's `DECISIONS.md` (run dir, never the repo) and injected into every later prompt on both sides.
 * The run resumes from the stored session IDs.
 * No answer → the run stays paused, reminder every N hours, other runs keep going.
+* Phase 4: every channel (terminal thread, `orq answer`, dashboard, WhatsApp) records the answer through one function (`core/answers.py: record_answer`), and a waiting run polls SQLite every `[notify].answer_poll_seconds` until it sees it. `orq run --no-prompt` exits at the decision instead; `orq resume` (also spawned by the dashboard or a WhatsApp `RESUME`) picks it up later.
 
 ### 9.3 WhatsApp via n8n + Evolution API (VPS)
 
@@ -240,11 +241,13 @@ Reply: D7K2 1  or  D7K2 <free text>
 
 **Commands:** `STATUS`, `PAUSE <run>`, `RESUME <run>`, `ABORT <run>`.
 
+Phase 4 implementation: `docs/n8n/orq-workflow.json` (webhooks `orq/notify`, `orq/replies`, `orq/replies/ack`, plus `orq/evolution` for Evolution's `MESSAGES_UPSERT`), `docs/n8n/orq_messages.sql`, `docs/n8n-setup.md`. Numbered replies are 1-based as printed in the message. `RESUME` spawns a detached `orq resume` on the PC; `ABORT` refuses a live run. Unknown messages get a one-line hint. Reminders are sent by the hub every `[notify].reminder_hours` while a decision is pending; run completions (`DONE`, `FAILED`, `ABORTED`) are announced once.
+
 **Note:** Evolution API uses an unofficial WhatsApp Web session. Use a dedicated sender number, not the owner's personal one.
 
 ### 9.4 Desktop
 
-Windows toast on every new decision and on run completion or failure.
+Windows toast on every new decision and on run completion or failure. Phase 4: `winotify` from the run process; a failed toast is an event (`toast_failed`), never an error. `[notify].toast = false` disables it.
 
 ## 10. Safety
 
@@ -414,10 +417,15 @@ source_globs = ["**/*.py", "**/*.js", "**/*.ts", "**/*.tsx", "**/*.jsx", "**/*.r
 
 [notify]
 toast = true
-n8n_base_url = "https://<vps>/webhook"
+n8n_base_url = "https://<vps>/webhook"   # empty disables WhatsApp
 n8n_token_env = "ORQ_N8N_TOKEN"
-poll_seconds = 20
+poll_seconds = 20                         # inbound replies (hub)
+outbox_poll_seconds = 5                   # new decisions and run states (hub)
+answer_poll_seconds = 3                   # a waiting run re-reads SQLite this often
 reminder_hours = 3
+
+[dashboard]
+port = 8765                               # 127.0.0.1 only
 ```
 
 ## 14. CLI surface
@@ -430,8 +438,10 @@ orq pause | abort <run_id>
 orq resume <run_id> [--no-prompt]
 orq rollback <run_id> --to <n>
 orq logs <run_id> [--follow]
-orq dashboard
+orq dashboard [--port <n>]
 ```
+
+`orq run` and `orq resume` wait for decisions to be answered from any channel (type in the terminal, use the dashboard, reply on WhatsApp, or `orq answer` elsewhere); `--no-prompt` exits at the decision instead. `orq dashboard` is the hub (section 5); WhatsApp works only while it runs.
 
 `--no-prompt` runs headless: the process exits at the first decision (`AWAITING_HUMAN`) and `orq answer` plus `orq resume` continue it. Without it, decisions are asked in the terminal.
 
@@ -495,6 +505,8 @@ Status: complete on 2026-10-06 (see `docs/phase3-findings.md`).
 * n8n + Evolution API outbound and inbound (pull), WhatsApp commands.
 
 **Exit criteria:** owner answers a business decision and a destructive approval from WhatsApp and the run continues.
+
+Status: implementation complete on 2026-10-07; exit-criterion run pending the owner's n8n import (see `docs/phase4-findings.md`).
 
 ### Phase 5: scale
 
