@@ -211,3 +211,51 @@ def test_pr_number_none_when_gh_fails(tmp_path: Path) -> None:
         raise GitError("no pull requests found")
 
     assert GitManager(gh=failing).pr_number(tmp_path, "orq/x") is None
+
+
+# Phase 6: rebase conflicts the implementer can resolve
+
+def conflicted_worktree(manager: GitManager, repo: Path, origin: Path, tmp_path: Path) -> Path:
+    worktree = tmp_path / "wt"
+    manager.create_worktree(repo, worktree, branch="orq/x", base="main")
+    (worktree / "README.md").write_text("ours\n", encoding="utf-8")
+    manager.commit_all(worktree, "iter 1")
+    seed_push(origin, tmp_path, "README.md", "theirs\n")
+    return worktree
+
+
+def test_start_rebase_stops_on_conflicts_and_continue_finishes(manager: GitManager, repo: Path, origin: Path, tmp_path: Path) -> None:
+    worktree = conflicted_worktree(manager, repo, origin, tmp_path)
+
+    assert manager.start_rebase(worktree, "main") == ["README.md"]
+    assert manager.rebase_in_progress(worktree)
+    assert manager.files_with_conflict_markers(worktree, ["README.md"]) == ["README.md"]
+
+    (worktree / "README.md").write_text("ours and theirs\n", encoding="utf-8")
+    assert manager.files_with_conflict_markers(worktree, ["README.md"]) == []
+    manager.stage(worktree, ["README.md"])
+    assert manager.continue_rebase(worktree) == []
+    assert not manager.rebase_in_progress(worktree)
+    assert git("log", "-1", "--format=%s", cwd=worktree).strip() == "iter 1"
+    assert manager.base_moved(worktree, "main") is False
+
+
+def test_abort_rebase_restores_the_branch(manager: GitManager, repo: Path, origin: Path, tmp_path: Path) -> None:
+    worktree = conflicted_worktree(manager, repo, origin, tmp_path)
+    before = manager.head(worktree)
+    manager.start_rebase(worktree, "main")
+
+    manager.abort_rebase(worktree)
+
+    assert not manager.rebase_in_progress(worktree) and manager.head(worktree) == before
+    assert (worktree / "README.md").read_text(encoding="utf-8") == "ours\n"
+
+
+def test_start_rebase_without_conflicts_returns_nothing(manager: GitManager, repo: Path, origin: Path, tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    manager.create_worktree(repo, worktree, branch="orq/x", base="main")
+    (worktree / "new.txt").write_text("hello\n", encoding="utf-8")
+    manager.commit_all(worktree, "iter 1")
+    seed_push(origin, tmp_path, "other.txt", "other\n")
+
+    assert manager.start_rebase(worktree, "main") == [] and not manager.rebase_in_progress(worktree)

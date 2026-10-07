@@ -772,6 +772,9 @@ def test_gate_rebase_conflict_asks_owner(env, tmp_path: Path) -> None:
 
     class ConflictImplementer(FakeImplementer):
         async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
+            if "## Rebase conflict" in prompt:  # gives up: the markers stay, orq undoes the attempt and asks the owner
+                log_path.write_text("{}\n", encoding="utf-8")
+                return AgentResult(ok=True, text="I could not decide between the two versions.", session_id=session_id)
             (cwd / "README.md").write_text("ours\n", encoding="utf-8")
             return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event, **kwargs)
 
@@ -791,6 +794,42 @@ def test_gate_rebase_conflict_asks_owner(env, tmp_path: Path) -> None:
 
     assert asyncio.run(runner.execute()) is RunState.ABORTED
     assert asked[-1].options == ["retry", "abort"] and "conflicts" in asked[-1].question
+    assert "README.md" in asked[-1].context and "conflict markers left in README.md" in asked[-1].context
+    assert (runner.worktree / "README.md").read_text(encoding="utf-8") == "ours\n"   # the attempt was undone
+    assert not runner.git.rebase_in_progress(runner.worktree)
+
+
+def test_gate_rebase_conflict_resolved_by_the_implementer_then_merged(env, tmp_path: Path) -> None:
+    make, paths, pr_calls = env
+    seed = tmp_path / "seed"
+    prompts: list[str] = []
+
+    class Resolver(FakeImplementer):
+        async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
+            if "## Rebase conflict" in prompt:
+                prompts.append(prompt)
+                (cwd / "README.md").write_text("ours and theirs\n", encoding="utf-8")
+                log_path.write_text("{}\n", encoding="utf-8")
+                return AgentResult(ok=True, text="README.md: kept both lines.", session_id=session_id)
+            (cwd / "README.md").write_text("ours\n", encoding="utf-8")
+            return await super().run(prompt, cwd=cwd, log_path=log_path, session_id=session_id, run_dir=run_dir, on_event=on_event, **kwargs)
+
+    class ConflictingCi(FakeCi):
+        def wait(self, worktree, pr_number):
+            if self.calls == 0:
+                (seed / "README.md").write_text("theirs\n", encoding="utf-8")
+                git("add", "-A", cwd=seed)
+                git("commit", "-q", "-m", "conflict", cwd=seed)
+                git("push", "-q", "origin", "main", cwd=seed)
+            return super().wait(worktree, pr_number)
+
+    runner = make(Resolver([ok()]), FakeReviewer([review("done", None), review("done", None)]), ci=ConflictingCi())
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert "README.md" in prompts[0] and "Do not run git rebase --continue" in prompts[0]
+    events = gate_events(paths, runner.run_id)
+    assert [e["files"] for e in events if e["type"] == "conflict_resolved"] == [["README.md"]]
+    assert git("show", "HEAD:README.md", cwd=runner.worktree) == "ours and theirs\n"
 
 
 def test_gate_final_review_continue_loops_once(env) -> None:

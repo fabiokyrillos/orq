@@ -27,8 +27,8 @@ from orq.core.hygiene import drop_orchestrator_milestones, review_complains_abou
 from orq.core.models import Decision, RunState, new_decision_id
 from orq.core.procs import kill_tree, pid_alive
 from orq.core.progress import ProgressTracker
-from orq.core.prompts import (IMPLEMENTER_RULES, build_implementer_prompt, build_planner_prompt, build_reviewer_prompt,
-                              guard_outcome_lines, plan_markdown)
+from orq.core.prompts import (IMPLEMENTER_RULES, build_conflict_prompt, build_implementer_prompt, build_planner_prompt,
+                              build_reviewer_prompt, guard_outcome_lines, plan_markdown)
 from orq.core.queue import QueueError, check_sandbox, create_run
 from orq.core.settings import Effective, resolve
 from orq.core.summary import write_summary
@@ -236,7 +236,7 @@ class Runner:
                 elif phase == "finalize":
                     self._finalize()
                 elif phase == "gate_ci":
-                    self._gate_ci()
+                    await self._gate_ci()
                 elif phase == "gate_review":
                     await self._gate_review()
                 elif phase == "gate_merge":
@@ -615,16 +615,24 @@ class Runner:
         if not scan.clean:
             raise _Stop(RunState.FAILED, f"gitleaks found secrets in the branch history: {scan.findings}")
 
-    def _gate_ci(self) -> None:
-        """Rebase when the base moved, then wait for GitHub Actions (re-running infrastructure failures)."""
+    async def _gate_ci(self) -> None:
+        """Rebase when the base moved (the implementer resolves conflicts first), then wait for GitHub Actions."""
         self._transition(RunState.FINALIZING, step="ci", round=self.cp.gate_rounds + 1)
+        if self.git.rebase_in_progress(self.worktree):
+            # A crash in the middle of a conflict round: start the rebase over from the last recorded commit.
+            self.git.abort_rebase(self.worktree)
+            self.git.reset_hard(self.worktree, self.cp.last_commit or "HEAD")
         if self.git.base_moved(self.worktree, self.task.base_branch):
-            if not self.git.rebase_onto_base(self.worktree, self.task.base_branch):
+            pre_rebase = self.git.head(self.worktree)
+            conflicts = self.git.start_rebase(self.worktree, self.task.base_branch)
+            failure = await self._resolve_conflicts(pre_rebase, conflicts) if conflicts else None
+            if failure is not None:
+                files, reason = failure
                 self._raise_decision("rebase_conflict", Decision(
                     decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
-                    question=f"Rebasing {self.cp.branch} onto origin/{self.task.base_branch} hit conflicts (rebase aborted). "
+                    question=f"Rebasing {self.cp.branch} onto origin/{self.task.base_branch} hit conflicts the implementer could not resolve. "
                              f"Resolve by hand in {self.worktree}, then answer retry; or abort.",
-                    options=["retry", "abort"], recommendation=0), payload={})
+                    options=["retry", "abort"], recommendation=0, **decision_text.rebase_conflict(files, reason)), payload={})
                 return
             self.cp.last_commit = self.git.head(self.worktree)
             self.git.force_push(self.worktree, self.cp.branch)
@@ -649,6 +657,55 @@ class Runner:
                 question=f"GitHub checks on PR #{self.cp.pr_number} did not finish within the timeout. Keep waiting?",
                 options=["keep waiting", "abort"], recommendation=0, **decision_text.ci_timeout(self.cp.pr_number, status.checks)),
                 payload={})
+
+    async def _resolve_conflicts(self, pre_rebase: str, conflicts: list[str]) -> tuple[list[str], str] | None:
+        """One implementer turn per conflicting commit, at most [merge].max_conflict_rounds (Phase 6).
+
+        orq checks every round (no conflicted paths, no markers, no guard denial) and runs `git rebase --continue` itself.
+        After the last commit the check command and a secret scan of the range must pass. Any failure puts the branch back
+        exactly as it was and returns (files, reason) for the owner's decision; success returns None.
+        """
+        seen: list[str] = []
+        itdir = self.rundir.iteration(self.cp.iteration)
+        reason = ""
+        for round_ in range(1, self.config.merge.max_conflict_rounds + 1):
+            seen += [f for f in conflicts if f not in seen]
+            self.rundir.event("rebase_conflict", round=round_, files=conflicts)
+            prompt = build_conflict_prompt(self.task, base=self.task.base_branch, files=conflicts, decisions=self.rundir.decisions_text())
+            (itdir / f"conflict-{round_}.prompt.md").write_text(prompt, encoding="utf-8")
+            result = await self._call("implementer", self.implementer, prompt, itdir / f"conflict-{round_}.stream.jsonl",
+                                      self.cp.implementer_session, model=self._effective()["implementer.default_model"])
+            if result.session_id:
+                self.cp.implementer_session = result.session_id
+            left = self.git.conflicted_files(self.worktree)
+            marked = self.git.files_with_conflict_markers(self.worktree, conflicts)
+            if result.decision or result.permission_denials or marked or (left and set(left) - set(conflicts)):
+                reason = (f"conflict markers left in {', '.join(marked)}" if marked else
+                          "the implementer asked a question instead" if result.decision else
+                          "the guard blocked an action during the resolution" if result.permission_denials else
+                          f"new conflicts in {', '.join(sorted(set(left) - set(conflicts)))}")
+                break
+            self.git.stage(self.worktree, conflicts)
+            conflicts = self.git.continue_rebase(self.worktree)
+            if not conflicts:
+                check = run_check(self.task.check_command, cwd=self.worktree, timeout=CHECK_TIMEOUT_SECONDS)
+                (itdir / "conflict.checks.txt").write_text(check.output, encoding="utf-8")
+                scan = self.scanner.scan_range(self.worktree, f"origin/{self.task.base_branch}",
+                                               report_path=self.rundir.path / "gitleaks.rebase.json")
+                if not check.ok:
+                    reason = f"the check command failed after the resolution: {check.output.strip()[-300:]}"
+                elif not scan.clean:
+                    reason = "gitleaks found secrets in the rebased branch"
+                else:
+                    self.rundir.event("conflict_resolved", rounds=round_, files=seen)
+                    return None
+                break
+        else:
+            reason = f"still conflicting after {self.config.merge.max_conflict_rounds} rounds"
+        self.git.abort_rebase(self.worktree)
+        self.git.reset_hard(self.worktree, pre_rebase)
+        self.rundir.event("conflict_resolution_failed", files=seen, reason=reason[:300])
+        return seen, reason
 
     def _gate_round_failed(self, next_prompt: str) -> None:
         """CI failed or the final review was not done: one more implementer iteration, then the gate restarts."""

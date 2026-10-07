@@ -132,6 +132,22 @@ def build_implementer_prompt(task: Task, *, iteration: int, milestone: str | Non
     return "\n\n".join(parts) + "\n"
 
 
+def build_conflict_prompt(task: Task, *, base: str, files: list[str], decisions: str) -> str:
+    """Phase 6: the implementer resolves a rebase conflict; orq continues the rebase and checks the result."""
+    listing = "\n".join(f"- {f}" for f in files)
+    parts = [_task_block(task)]
+    if decisions.strip():
+        parts.append("## Owner decisions so far\n" + decisions.strip())
+    parts.append(
+        f"## Rebase conflict\nThe base branch origin/{base} moved while this task was in review, and rebasing this branch onto it "
+        f"stopped with conflicts in:\n{listing}\n\n"
+        "Resolve them: keep the intent of both sides (the base's new changes and this task's work), remove every conflict marker "
+        "(<<<<<<<, =======, >>>>>>>), and leave the files consistent with each other and with the tests. Change nothing else. "
+        "Do not run git rebase --continue, --abort or --skip, git commit or git push: the orchestrator continues the rebase, runs "
+        "the check command and pushes. End with one line per file saying how you resolved it.")
+    return "\n\n".join(parts) + "\n"
+
+
 def build_reviewer_prompt(task: Task, *, iteration: int, milestone: str | None, diff_stat: str, diff_path: str,
                           diff_excerpt: str | None, check: CheckResult, implementer_report: str, decisions: str,
                           discarded: str | None = None, plan: dict | None = None, milestone_index: int = 0,

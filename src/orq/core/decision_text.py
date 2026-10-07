@@ -108,6 +108,14 @@ def ci_timeout(pr_number: int | None, checks: list[dict]) -> dict:
             "recommendation_reason": "free runners are sometimes slow; waiting once more is cheap"}
 
 
+def rebase_conflict(files: list[str], reason: str) -> dict:
+    return {"context": f"The base branch moved and rebasing hit conflicts in {', '.join(files) or 'some files'}. "
+                       f"The implementer tried to resolve them and orq undid the attempt: {reason.strip()[:400]}",
+            "option_details": ["after you resolve the conflict by hand in the worktree, the gate starts again (rebase, CI, review)",
+                               "the run stops (ABORTED); the PR stays open"],
+            "recommendation_reason": "a conflict the implementer cannot resolve usually needs a choice between two changes; only you can make it"}
+
+
 def gate_rounds(rounds: int, limit: int, reason: str) -> dict:
     return {"context": f"The merge gate failed {rounds} times (limit {limit}). Last reason: {reason.strip()[:400]}",
             "option_details": ["the implementer gets another round with the last failure; the counter starts over",

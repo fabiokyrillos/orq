@@ -188,6 +188,58 @@ class GitManager:
                 pass
             return False
 
+    # Phase 6: a conflicting rebase stays in progress so the implementer can resolve it; orq drives every git step.
+
+    def start_rebase(self, worktree: Path, base: str) -> list[str]:
+        """Rebase HEAD onto a fresh origin/<base>; return the conflicted files (empty when the rebase completed)."""
+        with self._locked(worktree):
+            self.git("fetch", "origin", base, cwd=worktree)
+        try:
+            self.git("rebase", f"origin/{base}", cwd=worktree)
+            return []
+        except GitError:
+            conflicts = self.conflicted_files(worktree)
+            if not conflicts:
+                raise
+            return conflicts
+
+    def conflicted_files(self, worktree: Path) -> list[str]:
+        return [line for line in self.git("diff", "--name-only", "--diff-filter=U", cwd=worktree).splitlines() if line.strip()]
+
+    def rebase_in_progress(self, worktree: Path) -> bool:
+        return any((Path(self.git("rev-parse", "--path-format=absolute", "--git-path", name, cwd=worktree).strip())).exists()
+                   for name in ("rebase-merge", "rebase-apply"))
+
+    def files_with_conflict_markers(self, worktree: Path, files: list[str]) -> list[str]:
+        marked = []
+        for name in files:
+            path = worktree / name
+            if not path.is_file():
+                continue
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if any(line.startswith(("<<<<<<< ", ">>>>>>> ")) or line == "<<<<<<<" for line in lines):
+                marked.append(name)
+        return marked
+
+    def stage(self, worktree: Path, files: list[str]) -> None:
+        if files:
+            self.git("add", "--", *files, cwd=worktree)
+
+    def continue_rebase(self, worktree: Path) -> list[str]:
+        """Continue after the conflicts were resolved; return the next commit's conflicts (empty when done)."""
+        try:
+            self.git("-c", "core.editor=true", "rebase", "--continue", cwd=worktree)
+            return []
+        except GitError:
+            conflicts = self.conflicted_files(worktree)
+            if not conflicts:
+                raise
+            return conflicts
+
+    def abort_rebase(self, worktree: Path) -> None:
+        if self.rebase_in_progress(worktree):
+            self.git("rebase", "--abort", cwd=worktree)
+
     def force_push(self, worktree: Path, branch: str) -> None:
         """orq's own push after a rebase; the implementer never gets to do this (guard rule git_force_push)."""
         with self._locked(worktree):

@@ -75,6 +75,8 @@ class MergeConfig:
     max_ci_reruns: int = 3
     # Gate restarts (CI failure or final review not done) before the owner is asked.
     max_gate_rounds: int = 3
+    # Implementer turns to resolve a rebase conflict (one per conflicting commit) before the owner is asked (Phase 6).
+    max_conflict_rounds: int = 3
 
 
 @dataclass
