@@ -3,7 +3,7 @@
 **Spec version:** 1.0
 **Date:** 2026-10-05
 **Owner:** Binho (Fábio Kyrillos)
-**Status:** Phases 0 to 5 complete (see `docs/phase*-findings.md`).
+**Status:** Phases 0 to 6 complete (see `docs/phase*-findings.md`).
 
 ---
 
@@ -32,7 +32,7 @@ Automate the loop the owner runs by hand today:
 |---|---|
 | OS | Windows (native) |
 | Claude Code | 2.1.219 |
-| Codex CLI | 0.139.0 |
+| Codex CLI | 0.161.0 (Phase 6; 0.139.0 before) |
 | Claude plan | Max 5x |
 | ChatGPT plan | Plus (tight limits, treat as scarce) |
 | Target repos | Public on GitHub (free Actions), created by the owner |
@@ -47,6 +47,7 @@ Automate the loop the owner runs by hand today:
 * Adapters strip every `CLAUDE*` and `ANTHROPIC*` variable from the child environment, so orq behaves the same when started from inside a Claude session.
 * The standalone `claude` CLI has its own login, separate from the desktop app. `claude auth status` must report `loggedIn: true` before a run starts.
 * The Codex model is always passed explicitly (`-m`). `~/.codex/config.toml` is shared with the desktop app and may name a model the CLI cannot use on a ChatGPT plan.
+* Phase 6: on a ChatGPT Plus account, CLI 0.139.0 refuses every model newer than `gpt-5.5`; 0.161.0 accepts `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-astra`, `gpt-6-luna`, `gpt-5.6-*` and `gpt-5.5`. Because orq ignores the user config (`--ignore-user-config`), it restates `-c windows.sandbox="unelevated"`: on 0.161.0 the elevated Windows sandbox fails to provision on this PC (`setup refresh had errors`), while unelevated reads files, runs python and blocks writes.
 * Every `claude -p` call uses `--setting-sources project,local --strict-mcp-config`, which keeps the owner's global plugins, hooks and MCP servers out of orq runs (146 tools and 58k context tokens down to 32 tools and 9k) while `--settings` hooks still load. `--safe-mode` and `--bare` are never used: the first disables orq's own guard hook, the second disables OAuth.
 * A Claude session can only be resumed from the directory it was created in, so every call for a run uses the worktree as cwd. `--append-system-prompt` is not stored in the session and is passed on every call.
 * The implementer runs with `--dangerously-skip-permissions`; the guard hook (section 10.3) is the control. A failed call reports `is_error: true` and exit code 1 while `subtype` still says `success`.
@@ -162,7 +163,12 @@ required | skip
 
 Confirmed in Phase 0: Codex rejects a schema unless every object sets `additionalProperties: false` and lists every property in `required`. Optional values are therefore nullable, not omitted: `next_prompt` is `["string","null"]` and `human` is `["object","null"]`. Codex forces every agent message, including intermediate progress notes, into this shape, so the adapter reads only the final message (`-o <file>`).
 
-Reviewer standing rules (in its prompt):
+Phase 6 additions, all required by the strict schema:
+* `owner_update` (string): 2 to 4 plain sentences for the owner's progress digests (section 9.3).
+* `task_complete` (boolean): with a clean `done`, the whole task already holds and the remaining milestones are skipped (event `milestones_skipped`).
+* `human` gains `context`, `option_details` (one consequence per option) and `recommendation_reason`, so the owner can decide from a phone. The same three fields are part of the planner's `human` (8.5) and the implementer's marker (8.3). The validator tolerates their absence in older answers.
+
+Reviewer standing rules (sent at the top of every reviewer prompt; until Phase 6 they were defined but never sent):
 
 * Any removal of a feature, file, test or behavior not required by TASK.md → `needs_human` with `decision_type: risk`.
 * Never guess business rules. Ask.
@@ -196,6 +202,17 @@ One to eight ordered milestones; `milestones` is empty and `human` set when `sta
 ### 8.4 Decision object (stored in SQLite)
 
 `decision_id` (short, e.g. `D7K2`), `run_id`, `source` (implementer | reviewer | guard), `decision_type`, `question`, `options`, `recommendation`, `destructive` (bool), `status` (pending | answered | expired), `answer`, `answered_via` (whatsapp | dashboard | cli), timestamps.
+
+Phase 6: `context`, `option_details` and `recommendation_reason`. Decisions from the models carry what the models wrote. orq builds them from evidence for its own decisions (`src/orq/core/decision_text.py`):
+* the guard rule and the current milestone;
+* the flagged files with line counts and the implementer's report;
+* gitleaks hits;
+* the stall rule and the last reviews;
+* the agent error;
+* CI state;
+* the rebase conflict and what the implementer tried.
+
+`DECISIONS.md` records the context with the answer, so both agents keep the evidence. `abort` marks a run's pending decisions `expired`.
 
 ## 9. Human in the loop
 
@@ -257,6 +274,7 @@ Windows toast on every new decision and on run completion or failure. Phase 4: `
 
 * Max iterations per run (default 15) and max wall time (default 6 h).
 * Max concurrent runs (default 2), because subscription limits are shared.
+* Phase 6: the dispatcher also spawns runs parked at a decision that was answered while no process waited for it (they rank with the runs that already started); `PAUSED` runs are never resumed automatically. Queued runs follow `queue_order`, which the dashboard can change (top, up, down, bottom); a queued run that has not started can have its TASK.md edited.
 * Phase 5: a run takes a slot (SQLite table `slots`, one `BEGIN IMMEDIATE` transaction) before agent work and gives it back when it raises a decision and when it ends; waiting for the owner costs no subscription time. `PAUSED_RATE_LIMIT` keeps its slot. A slot is granted when the global count is under `[limits].max_concurrent_runs`, the project's count is under its own cap (`max_concurrent`, default `[queue].project_concurrency` = 1) and no better waiter could take it first: runs that already started go before runs that never ran, then oldest first. Rows of dead processes are dropped on the next acquire. Time spent waiting for a slot or for the owner does not count toward `max_wall_hours`.
 
 ### 10.2 No progress detection
@@ -290,7 +308,7 @@ Confirmed in Phase 0:
 
 ### 10.4 Guard: post execution (diff rules)
 
-Deleted files, removed tests, removed exported functions or routes, protected paths (configurable per repo), large negative line balance. On `DENY`, the worktree is reset to the last iteration commit and the implementer is told to proceed without that change.
+Deleted files, removed tests, removed exported functions or routes, protected paths (configurable per repo), large negative line balance. Phase 6: a removal counts only when the run's base commit has the removed file, test, export, route or dependency; reworking what the run itself added in an earlier iteration never asks the owner. On `DENY`, the worktree is reset to the last iteration commit and the implementer is told to proceed without that change.
 
 Implemented in Phase 2 (`src/orq/guard/diff_rules.py`), evaluated on the staged index right after the secret scan and before the check command. Rule ids: `deleted_file`, `removed_test`, `removed_export`, `removed_route`, `protected_path`, `dependency_removed` (manifest lines in `pyproject.toml`, `requirements*.txt`, `package.json`, `Cargo.toml`, `go.mod`), `negative_balance` (net deleted source lines above `[guard].max_net_deleted_lines`, default 300, over `[guard].source_globs`). The name-based rules are heuristics: a removed name that reappears anywhere in the added lines (rename, move) does not fire. One decision per iteration lists every violation; the approved list lands in `DECISIONS.md` so the reviewer sees it. On deny the iteration ends without a commit or a review.
 
@@ -330,7 +348,7 @@ Confirmed in Phase 0:
 * Merging from inside the worktree works. `--delete-branch` removes the remote branch and skips the local delete with a warning (exit 0); orq removes the worktree and local branch itself.
 Implemented in Phase 3 as resumable phases after `finalize` (push, PR):
 
-* `gate_ci`: when `origin/<base>` moved, `git rebase` and `git push --force-with-lease` (orq's push, never the implementer's; a conflict aborts the rebase and asks the owner `retry`/`abort`); then `CiWatcher` polls `gh pr checks --json name,state,bucket,link` every `[merge].poll_seconds` for up to `[merge].ci_timeout_minutes`. "No checks reported" is pending during `[merge].ci_grace_minutes`, then the owner is asked (`merge without CI`/`abort`). A failing check whose run has no job steps is re-run (`gh run rerun`, at most `[merge].max_ci_reruns`); a real failure sends the run back to the implementer with the tail of `gh run view --log-failed`.
+* `gate_ci`: when `origin/<base>` moved, `git rebase` and `git push --force-with-lease` (orq's push, never the implementer's). Phase 6: on a conflict, the implementer gets one turn per conflicting commit (at most `[merge].max_conflict_rounds`) to resolve the files. orq checks that no conflicted paths and no markers are left, continues the rebase itself, then runs the check command and a secret scan of the range. Any failure aborts the rebase, resets the branch, and asks the owner `retry`/`abort` with the files and the reason; then `CiWatcher` polls `gh pr checks --json name,state,bucket,link` every `[merge].poll_seconds` for up to `[merge].ci_timeout_minutes`. "No checks reported" is pending during `[merge].ci_grace_minutes`, then the owner is asked (`merge without CI`/`abort`). A failing check whose run has no job steps is re-run (`gh run rerun`, at most `[merge].max_ci_reruns`); a real failure sends the run back to the implementer with the tail of `gh run view --log-failed`.
 * `gate_review`: final reviewer pass at `[reviewer].final_effort` against the whole task with the PR diff stat and the CI result; `done` with no blocker/major issue proceeds, anything else sends the run back to the implementer. Gate restarts are bounded by `[merge].max_gate_rounds`.
 * `gate_merge`: no pending decisions, base re-checked (back to `gate_ci` if it moved), secret scan of the range, `gh pr merge <n> --<strategy> --delete-branch`, `gh pr view --json state` must say `MERGED`, worktree and local branch removed (`[git].keep_worktree` keeps them for debugging).
 
@@ -380,6 +398,14 @@ Never inside the repo (repos are public):
 * Any other agent failure (`error`, `auth`) is never retried blindly and no longer ends the run as `FAILED`: it raises a `blocked` decision with `retry` and `abort`. `FAILED` is reserved for invariants (invalid reviewer output after a retry, limits exceeded).
 * Keep reviewer prompts lean: the reviewer reads the repo; send only task, milestone, diff summary, check results, implementer final message.
 * Reviewer effort: low for routine iterations, high for planning and the final merge gate.
+* Phase 6: models and efforts are settings in layers, resolved before every agent call:
+  1. TASK.md `## Models`;
+  2. the project;
+  3. global dashboard overrides;
+  4. `config.toml`;
+  5. defaults.
+
+  A change in the dashboard applies from the next call of a running run. The role events record `model` and `effort`. The router sends the Codex model to Codex and `reviewer.claude_model` to the Claude fallback. Default Codex model: `gpt-6.1-sol`.
 * Implementer model per step: planner may tag milestones as `hard` (Opus) or `mechanical` (Sonnet). Phase 3: the model is passed on every implementer call (`--model` on a resumed session keeps the context, Phase 0) and recorded as an `implementer_model` event; reviewer effort is `routine_effort` for milestone reviews and `final_effort` for planning and the final review.
 
 ## 13. Configuration (example)
@@ -397,7 +423,9 @@ mechanical_model = "sonnet"
 
 [reviewer]
 primary = "codex"
-codex_model = "gpt-5.5"
+codex_model = "gpt-6.1-sol"
+claude_model = ""                           # Claude reviewer; empty follows implementer.default_model
+codex_windows_sandbox = "unelevated"        # restated because the user config is ignored (Phase 6)
 fallback = "claude"
 switch_at_used_percent = 90
 routine_effort = "low"
@@ -416,6 +444,7 @@ ci_timeout_minutes = 60
 ci_grace_minutes = 5
 max_ci_reruns = 3
 max_gate_rounds = 3
+max_conflict_rounds = 3                     # implementer turns on a rebase conflict before the owner is asked
 
 [guard]
 max_net_deleted_lines = 300
@@ -429,6 +458,7 @@ poll_seconds = 20                         # inbound replies (hub)
 outbox_poll_seconds = 5                   # new decisions and run states (hub)
 answer_poll_seconds = 3                   # a waiting run re-reads SQLite this often
 reminder_hours = 3
+progress_minutes = 30                     # digest of a working run this often and when a milestone ends; 0 disables
 
 [dashboard]
 port = 8765                               # 127.0.0.1 only
@@ -451,7 +481,8 @@ orq pause | abort <run_id>
 orq resume <run_id> [--no-prompt]
 orq rollback <run_id> --to <n>
 orq logs <run_id> [--follow]
-orq dashboard [--port <n>]
+orq dashboard [--port <n>] [--log-file <path>]
+orq hub autostart on|off|status
 ```
 
 `orq queue` only queues; the hub starts the run when a slot is free (or `orq resume <run_id>` by hand). `orq status` shows slot usage and the queue length. A project added from a folder only reads that folder's `origin`; orq always works in its own clone.
@@ -532,6 +563,27 @@ Status: complete on 2026-10-07 (see `docs/phase4-findings.md`): run `RHGBG6` was
 **Exit criteria:** with `max_concurrent_runs = 2`, three tasks created and queued from the dashboard across two projects; two run at once and the third starts when a slot frees; a run parked on a decision does not block the queue; all three end with a merged PR; every finished run shows its summary and can be replayed iteration by iteration.
 
 Status: complete on 2026-10-07 (see `docs/phase5-findings.md`).
+
+### Phase 6: refinement before real projects (added after Phase 5 at the owner's request)
+
+* Models and efforts changeable at any time, in layers (section 12), and per project guard settings.
+* Decisions with context, option consequences and the reason for the recommendation (8.2, 8.4). A decision answered on another channel is announced on WhatsApp, and FAILED or ABORTED carry their reason.
+* Progress digests from the reviewer's `owner_update`, sent on WhatsApp when a milestone ends and every `[notify].progress_minutes` while a run works. `STATUS <run>` returns one, and the dashboard shows one.
+* `task_complete` and a planner rule for small tasks.
+* Hub autostart at logon (`orq hub autostart`) and automatic resume of runs whose decision is answered while no process waits.
+* Rebase conflicts resolved by the implementer (10.7).
+* Editable queue (reorder, edit queued tasks).
+
+**Exit criteria:**
+* the reviewer model changed in the dashboard during a run is used by the next review;
+* a business decision on WhatsApp has enough content to decide;
+* a task with 3 or more milestones sends digests;
+* a small task finishes in one iteration;
+* a provoked rebase conflict is resolved by the implementer and merged;
+* an answer to a run without a process resumes it;
+* after a reboot the hub starts by itself.
+
+Status: see `docs/phase6-findings.md`.
 
 ## 16. Non goals
 
