@@ -1,7 +1,7 @@
 # Phase 4 findings
 
 **Date:** 2026-10-07
-**Status:** IMPLEMENTATION COMPLETE, exit criterion pending. Everything is tested against a fake n8n; the real test (a business decision and a destructive approval answered from WhatsApp) needs the owner to import `docs/n8n/orq-workflow.json` into the VPS n8n and set `ORQ_N8N_TOKEN` plus `[notify].n8n_base_url`.
+**Status:** COMPLETE. Exit criterion met on 2026-10-07: in run `RHGBG6` the owner answered a reviewer question (`DRF2C 1`) and two destructive approvals (`APPROVE DQ4K9`, `APPROVE DYN7V`) from WhatsApp, the run continued each time and ended with PR #6 merged, announced back on WhatsApp.
 
 Design: `docs/superpowers/specs/2026-10-07-phase4-remote-human-design.md`. Plan: `docs/superpowers/plans/2026-10-07-phase4-remote-human.md`.
 
@@ -26,21 +26,37 @@ Design: `docs/superpowers/specs/2026-10-07-phase4-remote-human-design.md`. Plan:
 
 ## 4. Other findings
 
+* Fixes needed on the imported workflow: the owner replaced the HTTP Request node with the community Evolution node and typed `=$json.body.text` (literal text; it must be `{{ $json.body.text }}`); the two Data table conditions on `id` lost their column after the node UI reloaded the schema and had to be re-selected; the `OWNER_NUMBER` placeholder in the `If` node had to be replaced. All visible in the pasted JSON before the first test.
+* `[Environment]::SetEnvironmentVariable(..., "User")` writes `HKCU\Environment`; processes started earlier (the shell driving orq) never see it, so the hub first reported `WhatsApp: off`. `read_secret` now falls back to the user's persistent environment on Windows.
+* Decisions left pending by aborted runs (three of them from Phases 2 and 3) would have been sent to the phone at hub start; the outbound loop now skips decisions whose run is finished.
+
 * Decision IDs are `D` plus 4 characters (`DQMKR`); the SPEC example `D7K2` has 3. The reply parser accepts 3 to 5.
 * SQLite connections now use `check_same_thread=False`: the hub answers requests from worker threads and the CLI's terminal thread has its own `Store` anyway.
 * The answer can land before the waiting run's first poll (the terminal thread or the dashboard are fast); the run then takes the `answer_applied` path without printing "answered via". Harmless; the event log has the channel.
 * `pytest` wall time grew to about 4 minutes because the CLI tests drive full fake runs through the gate and the new waiting mode; still under the integration marker threshold.
 
-## 5. Exit-criterion run: pending
+## 5. Exit-criterion run `RHGBG6` (owner on the phone, hub on the PC)
 
-Steps once the n8n workflow is live (section 5 of `docs/n8n-setup.md`):
+Setup done by the owner in about an hour from the guide: Data table `orq_messages`, two Header Auth credentials, workflow imported, Evolution webhook. Three fixes were needed after import (section 4 below). Endpoint checks from the PC before the run: `notify` 200, `replies` returned the owner's `hello` (id 1), `ack` consumed it, a request without the token got 403.
 
-1. `orq dashboard` in one terminal (`WhatsApp: on`).
-2. `orq run ~/.orq/tasks/phase2-guard.md` in another: the hook denies `rm -rf probe.txt`; the phone receives `*[orq] D.... · orq-phase0-sandbox · iteration 1*` with `Reply: APPROVE D.... or DENY D....`; reply `APPROVE D....`; the run continues to the diff-rule decision, approve that one too, and the PR merges.
-3. A task with an ambiguous requirement for the business decision (for example "add a discount helper; whether it applies before or after tax is not specified") answered with `D.... 1` from the phone.
+```
+16:33:16 QUEUED           orq run ~/.orq/tasks/phase2-guard.md (default wait mode, no terminal thread: stdin was not a tty)
+16:33:18 PLANNING         2 milestones
+16:34:12 IMPLEMENTING 1   hook: deny recursive_delete `rm -rf probe.txt`; CHANGELOG.md written
+16:34:57 AWAITING_HUMAN   DRF2C (reviewer, blocked) -> toast at :57, WhatsApp at 16:35:12 (hub outbound poll)
+18:04:45 answer           "DRF2C 1" from the phone -> applied at 18:04:48 (hub inbound poll 20 s, run poll 3 s)
+18:04:48 AWAITING_HUMAN   DQ4K9 (guard, destructive) -> WhatsApp
+18:05:29 answer           "APPROVE DQ4K9" -> token written, implementer ran the command at 18:05:37 (allow-by-token)
+18:05:51 AWAITING_HUMAN   DYN7V (diff guard, deleted_file) -> WhatsApp
+18:06:31 answer           "APPROVE DYN7V" -> applied, check ok, commit, review
+18:06:57 IMPLEMENTING 3   reviewer asked for one more pass (milestone 2), done
+18:07:39 FINALIZING       PR #6; CI passed after 21 s; final review done at 18:08:29
+18:08:37 DONE             squash merge, worktree removed; toast and WhatsApp "RHGBG6 · orq-phase0-sandbox · DONE" at 18:08:42
+```
 
-Record the timings and the exact messages here, then mark Phase 4 complete in `docs/SPEC.md` section 15.
+The 90-minute gap between the first notification and the first answer was the owner being away; the hub kept the dashboard up and would have sent a reminder at 3 h. Each WhatsApp hop (phone to applied answer) took 3 to 5 s on top of the 20 s inbound poll.
 
+Confirmed: numbered answers for ordinary decisions, `APPROVE <id>` for destructive ones, confirmations sent back after each, cursor advanced to 4, no stale decision from earlier aborted runs was announced.
 ## 6. Carried into Phase 5
 
 * Dashboard authentication if it ever leaves loopback.

@@ -70,10 +70,18 @@ def test_wrong_token_raises(n8n: FakeN8n) -> None:
 
 def test_from_config_requires_url_and_token(monkeypatch: pytest.MonkeyPatch) -> None:
     config = Config()
-    monkeypatch.delenv("ORQ_N8N_TOKEN", raising=False)
+    config.notify.n8n_token_env = "ORQ_TEST_TOKEN_NOT_SET"  # a real ORQ_N8N_TOKEN may exist in the user profile
     assert WhatsAppClient.from_config(config) is None
     config.notify.n8n_base_url = "https://vps.example/webhook"
     assert WhatsAppClient.from_config(config) is None
-    monkeypatch.setenv("ORQ_N8N_TOKEN", "secret-token")
+    monkeypatch.setenv("ORQ_TEST_TOKEN_NOT_SET", "secret-token")
     c = WhatsAppClient.from_config(config)
     assert c is not None and c.base_url == "https://vps.example/webhook"
+
+
+def test_read_secret_prefers_process_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    from orq.notify.whatsapp import read_secret
+    monkeypatch.setenv("ORQ_TEST_SECRET", " abc ")
+    assert read_secret("ORQ_TEST_SECRET") == "abc"
+    monkeypatch.delenv("ORQ_TEST_SECRET", raising=False)
+    assert read_secret("ORQ_TEST_SECRET_MISSING_FOR_SURE") == ""

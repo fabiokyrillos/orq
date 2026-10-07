@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 
 import httpx
@@ -27,10 +28,11 @@ class WhatsAppClient:
     def from_config(cls, config: Config, http: httpx.Client | None = None) -> WhatsAppClient | None:
         """None when WhatsApp is not configured: no base URL, or the token variable is missing."""
         base = config.notify.n8n_base_url.strip()
-        token = os.environ.get(config.notify.n8n_token_env, "").strip()
+        token = read_secret(config.notify.n8n_token_env)
         if not base or not token:
             return None
         return cls(base, token, http=http)
+
 
     def send(self, text: str) -> None:
         response = self._http.post(f"{self.base_url}/orq/notify", json={"text": text}, headers=self._headers)
@@ -53,3 +55,21 @@ class WhatsAppClient:
             return
         response = self._http.post(f"{self.base_url}/orq/replies/ack", json={"ids": ids}, headers=self._headers)
         response.raise_for_status()
+
+def read_secret(name: str) -> str:
+    """The process environment first; on Windows, fall back to the user's persistent environment.
+
+    `[Environment]::SetEnvironmentVariable(..., "User")` writes HKCU\\Environment, which processes started
+    earlier never see; reading it there means no terminal restart is needed.
+    """
+    value = os.environ.get(name, "").strip()
+    if value or sys.platform != "win32":
+        return value
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            stored, _ = winreg.QueryValueEx(key, name)
+        return str(stored).strip()
+    except OSError:
+        return ""

@@ -506,7 +506,7 @@ Status: complete on 2026-10-06 (see `docs/phase3-findings.md`).
 
 **Exit criteria:** owner answers a business decision and a destructive approval from WhatsApp and the run continues.
 
-Status: implementation complete on 2026-10-07; exit-criterion run pending the owner's n8n import (see `docs/phase4-findings.md`).
+Status: complete on 2026-10-07 (see `docs/phase4-findings.md`): run `RHGBG6` was driven to a merged PR with every decision answered from WhatsApp.
 
 ### Phase 5: scale
 
