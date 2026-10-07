@@ -26,6 +26,7 @@ class Checkpoint:
     pid: int = field(default_factory=os.getpid)
     commits: dict[str, str] = field(default_factory=dict)      # iteration -> sha after that iteration
     summaries: dict[str, str] = field(default_factory=dict)    # iteration -> reviewer summary
+    updates: dict[str, str] = field(default_factory=dict)      # iteration -> reviewer's owner_update (Phase 6 digests)
     implementer_session: str | None = None
     reviewer_session: str | None = None
     outcome: dict = field(default_factory=lambda: {"next_prompt": None, "milestone": None, "done": False})

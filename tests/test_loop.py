@@ -1188,3 +1188,15 @@ def test_plan_approval_shows_goals_and_done_when(env) -> None:
     d = runner.store.pending_decisions(runner.run_id)[0]
     assert "1. Add greeting [mechanical]: goal of Add greeting Done when: Add greeting is in place" in d.context
     assert d.context.startswith("the plan") and d.option_details[1].startswith("the planner plans again")
+
+
+def test_owner_updates_are_kept_for_the_digest(env) -> None:
+    make, paths, _ = env
+    first = review("done", None)
+    first.structured["owner_update"] = "Greeting file added; next the tests."
+    runner = make(FakeImplementer([ok()]), FakeReviewer([first]))
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    updates = [e for e in gate_events(paths, runner.run_id) if e["type"] == "owner_update"]
+    assert updates[0]["text"] == "Greeting file added; next the tests." and updates[0]["iteration"] == 1 and updates[0]["milestone"] == 1
+    assert runner.cp.updates["1"] == "Greeting file added; next the tests."

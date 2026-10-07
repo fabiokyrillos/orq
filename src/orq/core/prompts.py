@@ -35,6 +35,7 @@ Standing rules:
 - The check command result below was produced by the orchestrator in the real environment and is authoritative. Do not re-run it, and never report tool availability in your sandbox as an issue.
 - Otherwise status continue, with next_prompt: concrete, self-contained instructions for the implementer's next turn. Mention file names.
 - Keep summary to a few sentences. List real problems in issues with a severity.
+- owner_update is for the owner, not the implementer: 2 to 4 plain sentences on what this iteration achieved and what comes next, in terms of the task's behaviour (explain any file or function name). Use an empty string only when nothing changed.
 - human must be null unless status is needs_human.
 """ + HUMAN_GUIDE
 

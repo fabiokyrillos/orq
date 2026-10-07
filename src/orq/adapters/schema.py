@@ -48,17 +48,21 @@ REVIEW_SCHEMA = {
             },
         },
         "human": _HUMAN,
+        # Phase 6: plain-language progress for the owner's digests (what this iteration achieved, what comes next).
+        "owner_update": {"type": "string"},
     },
-    "required": ["status", "summary", "milestone", "next_prompt", "issues", "human"],
+    "required": ["status", "summary", "milestone", "next_prompt", "issues", "human", "owner_update"],
     "additionalProperties": False,
 }
+# Fields the CLI is asked for but older answers (and the test fakes) may lack; the runner treats them as empty.
+TOLERATED_MISSING = {"owner_update", "task_complete"}
 
 
 def validate_review(data: object) -> list[str]:
     """Return a list of problems; empty means the object matches the contract."""
     if not isinstance(data, dict):
         return ["output is not a JSON object"]
-    problems = [f"missing key: {key}" for key in REVIEW_SCHEMA["required"] if key not in data]
+    problems = [f"missing key: {key}" for key in REVIEW_SCHEMA["required"] if key not in data and key not in TOLERATED_MISSING]
     if data.get("status") not in STATUSES:
         problems.append(f"status must be one of {STATUSES}, got {data.get('status')!r}")
     if not isinstance(data.get("issues", []), list):

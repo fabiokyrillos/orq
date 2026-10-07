@@ -494,6 +494,7 @@ class Runner:
         (itdir / "reviewer.output.json").write_text(json.dumps(review, indent=2), encoding="utf-8")
         self.cp.discarded = None
         self.cp.summaries[str(it)] = str(review.get("summary", ""))
+        self._record_update(review)
 
         status = review["status"]
         if status == "needs_human":
@@ -564,6 +565,14 @@ class Runner:
         if problems:
             raise _Stop(RunState.FAILED, "reviewer output invalid: " + "; ".join(problems))
         return result.structured  # type: ignore[return-value]
+
+    def _record_update(self, review: dict) -> None:
+        """Keep the reviewer's plain-language update for the owner's progress digests (Phase 6)."""
+        update = " ".join(str(review.get("owner_update") or "").split())
+        if not update:
+            return
+        self.cp.updates[str(self.cp.iteration)] = update
+        self.rundir.event("owner_update", iteration=self.cp.iteration, milestone=self.cp.milestone_index + 1, text=update)
 
     def _after_review(self) -> None:
         if self.cp.denied_actions:
@@ -669,6 +678,7 @@ class Runner:
         review = await self._run_review(prompt, itdir / "final_review.stream.jsonl", effort_key="reviewer.final_effort", check_ok=check.ok)
         (itdir / "final_review.output.json").write_text(json.dumps(review, indent=2), encoding="utf-8")
         self.rundir.event("final_review", status=review["status"], summary=str(review.get("summary", ""))[:300])
+        self._record_update(review)
         if review["status"] == "needs_human":
             h = review.get("human") or {}
             self.cp.outcome = {"next_prompt": "Continue with the owner's answer above.", "milestone": self.cp.outcome.get("milestone"), "done": False}

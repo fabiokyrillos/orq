@@ -413,11 +413,18 @@ function attach(url, pre) {
 
 function liveTab(el, id) {
   el.innerHTML = `
+    <div class="pane card"><h3>progress <a href="javascript:void 0" id="digest-refresh" class="small">refresh</a></h3><pre id="digest" class="muted">loading…</pre></div>
     <div class="pane card"><h3>events</h3><pre id="events"></pre></div>
     <div class="grid2">
       <div class="pane card"><h3>implementer (claude)</h3><pre id="impl"></pre></div>
       <div class="pane card"><h3>reviewer</h3><pre id="rev"></pre></div>
     </div>`;
+  const loadDigest = async () => {
+    try { const d = await api(`/api/runs/${id}/digest`); $('#digest').textContent = d.text.replace(/^\*|\*$/gm, ''); $('#digest').classList.remove('muted'); }
+    catch (e) { $('#digest').textContent = e.message; }
+  };
+  $('#digest-refresh').onclick = loadDigest;
+  loadDigest();
   attach(`/api/runs/${id}/events`, $('#events'));
   attach(`/api/runs/${id}/stream/implementer`, $('#impl'));
   attach(`/api/runs/${id}/stream/reviewer`, $('#rev'));

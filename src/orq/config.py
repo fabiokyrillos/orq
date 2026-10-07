@@ -88,6 +88,7 @@ class NotifyConfig:
     outbox_poll_seconds: float = 5         # new decisions and run states to send (hub)
     answer_poll_seconds: float = 3         # a waiting run re-reads SQLite this often
     reminder_hours: float = 3
+    progress_minutes: float = 30           # digest of a working run this often, and when a milestone ends; 0 disables
 
 
 @dataclass

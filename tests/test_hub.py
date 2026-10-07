@@ -515,3 +515,53 @@ def test_failed_and_aborted_carry_their_reason(home: OrqPaths) -> None:
     t.outbound_once()
 
     assert "RAAAAA · sandbox · FAILED" in fake.sent[-1] and fake.sent[-1].endswith("max iterations (3) reached")
+
+
+# Phase 6: progress digests
+
+def working_run(home: OrqPaths) -> Store:
+    store = seed(home, state=RunState.IMPLEMENTING, phase="implement")
+    rundir = RunDir(home.run_dir("RAAAAA"))
+    rundir.event("owner_update", iteration=1, milestone=1, text="The greeting file exists.")
+    return store
+
+
+def test_progress_digest_on_milestone_end_and_on_the_timer(home: OrqPaths) -> None:
+    store = working_run(home)
+    fake = FakeClient()
+    now = [time_of_first_event(home) + 60]
+    t = tasks(home, store, fake, clock=lambda: now[0])
+
+    assert t.outbound_once() == 0                         # nothing new since the hub started, timer not due
+    RunDir(home.run_dir("RAAAAA")).event("milestone_done", iteration=1, milestone=1, of=1)
+    assert t.outbound_once() == 1 and fake.sent[-1].startswith("*[orq] RAAAAA · sandbox ·") and "Done:" in fake.sent[-1]
+    assert t.outbound_once() == 0
+    now[0] += 30 * 60 + 1
+    assert t.outbound_once() == 1 and "Latest: The greeting file exists." in fake.sent[-1]
+
+
+def test_no_timer_digest_while_waiting_for_the_owner(home: OrqPaths) -> None:
+    store = seed(home, decision=business())               # AWAITING_HUMAN
+    fake = FakeClient()
+    now = [time_of_first_event(home) + 3 * 3600]
+    t = tasks(home, store, fake, clock=lambda: now[0])
+    t.outbound_once()                                      # the decision itself
+    assert not any(m.startswith("*[orq] RAAAAA") for m in fake.sent)
+
+
+def test_status_of_one_run_returns_its_digest(home: OrqPaths) -> None:
+    store = working_run(home)
+    fake = FakeClient()
+    reply = tasks(home, store, fake).handle("STATUS RAAAAA")
+    assert reply.startswith("*[orq] RAAAAA · sandbox ·") and "Latest: The greeting file exists." in reply
+
+
+def test_digest_endpoint(home: OrqPaths) -> None:
+    working_run(home)
+    assert "The greeting file exists." in client(home).get("/api/runs/RAAAAA/digest").json()["text"]
+
+
+def time_of_first_event(home: OrqPaths) -> float:
+    from datetime import datetime
+    first = json.loads((home.run_dir("RAAAAA") / "events.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    return datetime.fromisoformat(first["ts"]).timestamp()

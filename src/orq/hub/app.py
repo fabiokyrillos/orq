@@ -30,6 +30,7 @@ from orq.core.models import Decision, Project, RunRecord, RunState
 from orq.core.projects import ProjectError, add_project
 from orq.core.settings import EFFORTS, KEYS, LIVE_KEYS, TASK_ALIASES, SettingsError, codex_models, resolve, validate_overrides
 from orq.core.queue import QueueError, enqueue
+from orq.core.digest import build_digest
 from orq.core.summary import build_replay, load_summary
 from orq.core.task import TaskError, parse_task
 from orq.core.taskfile import TaskFields, render_task
@@ -307,6 +308,11 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
     @app.get("/api/runs/{run_id}/summary")
     async def summary(run_id: str) -> dict:
         return load_summary(run_dir_or_404(run_id))
+
+    @app.get("/api/runs/{run_id}/digest")
+    async def digest(run_id: str) -> dict:
+        run = store.get_run(run_id)
+        return {"text": build_digest(run_dir_or_404(run_id), repo=run.repo if run else None)}
 
     @app.get("/api/runs/{run_id}/replay")
     async def replay(run_id: str) -> dict:
