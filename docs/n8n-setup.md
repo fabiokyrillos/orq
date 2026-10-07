@@ -6,22 +6,19 @@ orq talks to three authenticated n8n webhooks (SPEC 9.3) and never to Evolution 
 
 Run `docs/n8n/orq_messages.sql` on the VPS database n8n can reach. Create an n8n Postgres credential named `orq postgres` for it.
 
-## 2. n8n variables and credentials
+## 2. n8n credentials
 
-Environment variables on the n8n host (restart n8n after setting them):
+Two *Header Auth* credentials and one Postgres credential, created under Credentials:
 
-| Variable | Meaning |
-|---|---|
-| `EVOLUTION_URL` | Evolution API base URL, e.g. `https://evo.example.com` |
-| `EVOLUTION_INSTANCE` | the instance of the dedicated sender number |
-| `EVOLUTION_APIKEY` | that instance's API key |
-| `ORQ_OWNER_NUMBER` | your number in E.164 without `+`, e.g. `5511999998888` |
-
-Credential `orq bearer` (type *Header Auth*): name `Authorization`, value `Bearer <long random token>`. The same token goes into the `ORQ_N8N_TOKEN` environment variable on the PC that runs orq.
+| Credential | Type | Name header | Value |
+|---|---|---|---|
+| `orq bearer` | Header Auth | `Authorization` | `Bearer <long random token>` (the same token goes into `ORQ_N8N_TOKEN` on the PC) |
+| `evolution apikey` | Header Auth | `apikey` | the instance's API key shown in Evolution Manager (eye icon on the instance card) |
+| `orq postgres` | Postgres | | host, database, user, password of a Postgres n8n can reach |
 
 ## 3. Import the workflow
 
-Import `docs/n8n/orq-workflow.json`, attach `orq bearer` to the three authenticated webhooks and `orq postgres` to the three Postgres nodes, then activate it. Production URLs look like `https://<n8n>/webhook/orq/notify`; `[notify].n8n_base_url` in `config.toml` is the part before `/orq/...`, so `https://<n8n>/webhook`.
+Import `docs/n8n/orq-workflow.json`, attach `orq bearer` to the three authenticated webhooks, `evolution apikey` to the `Evolution sendText` node and `orq postgres` to the three Postgres nodes. Then edit three placeholders: in `Evolution sendText`, the URL `https://EVOLUTION_HOST/message/sendText/INSTANCE_NAME` (your Evolution host and the instance name) and `OWNER_NUMBER` in the JSON body; in `Only the owner`, `OWNER_NUMBER` again. The owner number is your personal number in international format without `+`, not the instance's number. Activate the workflow. Production URLs look like `https://<n8n>/webhook/orq/notify`; `[notify].n8n_base_url` in `config.toml` is the part before `/orq/...`, so `https://<n8n>/webhook`.
 
 Point Evolution's webhook for the sender instance at `https://<n8n>/webhook/orq/evolution` with the `MESSAGES_UPSERT` event enabled. The `Only the owner` node drops everything that is not from `ORQ_OWNER_NUMBER` or that the sender itself wrote.
 

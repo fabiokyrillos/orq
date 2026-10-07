@@ -19,19 +19,20 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.EVOLUTION_URL }}/message/sendText/{{ $env.EVOLUTION_INSTANCE }}",
-        "sendHeaders": true,
-        "headerParameters": { "parameters": [ { "name": "apikey", "value": "={{ $env.EVOLUTION_APIKEY }}" } ] },
+        "url": "https://EVOLUTION_HOST/message/sendText/INSTANCE_NAME",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ number: $env.ORQ_OWNER_NUMBER, text: $json.body.text }) }}",
+        "jsonBody": "={{ JSON.stringify({ number: \"OWNER_NUMBER\", text: $json.body.text }) }}",
         "options": {}
       },
       "id": "a2",
       "name": "Evolution sendText",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [260, 0]
+      "position": [260, 0],
+      "credentials": { "httpHeaderAuth": { "id": "REPLACE", "name": "evolution apikey" } }
     },
     {
       "parameters": { "respondWith": "json", "responseBody": "={{ { ok: true } }}", "options": {} },
@@ -142,7 +143,7 @@
             {
               "id": "owner",
               "leftValue": "={{ ($json.body.data?.key?.remoteJid || '').split('@')[0] }}",
-              "rightValue": "={{ $env.ORQ_OWNER_NUMBER }}",
+              "rightValue": "OWNER_NUMBER",
               "operator": { "type": "string", "operation": "equals" }
             },
             {
