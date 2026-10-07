@@ -588,3 +588,13 @@ def test_queue_move_and_edit_endpoints(home: OrqPaths) -> None:
     Store(home.db).set_state(first, RunState.PLANNING)
     assert c.put(f"/api/runs/{first}/task", json={"markdown": edited}).status_code == 409
     assert c.post(f"/api/runs/{first}/move", json={"to": "up"}).status_code == 409
+
+
+def test_decisions_answered_before_the_hub_started_are_not_echoed(home: OrqPaths) -> None:
+    from orq.core.answers import record_answer
+    store = seed(home, decision=business())
+    store.mark_notified("decision", "DBBBB", "whatsapp")        # sent by an earlier hub
+    record_answer(store, home, "DBBBB", "0", via="dashboard")   # answered while no hub ran
+    fake = FakeClient()
+
+    assert tasks(home, store, fake).outbound_once() == 0 and fake.sent == []

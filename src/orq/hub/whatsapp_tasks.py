@@ -40,7 +40,9 @@ class WhatsAppTasks:
         self._baseline()
 
     def _baseline(self) -> None:
-        """Runs that ended before the hub started are old news: mark them without sending."""
+        """Runs that ended and answers given before the hub started are old news: mark them without sending."""
+        for decision in self.store.answered_elsewhere(CHANNEL):
+            self.store.mark_notified("decision_answered", decision.decision_id, CHANNEL)
         for run in self.store.list_runs():
             if run.state in TERMINAL and self.store.notified_at("run_state", f"{run.run_id}:{run.state.value}", CHANNEL) is None:
                 self.store.mark_notified("run_state", f"{run.run_id}:{run.state.value}", CHANNEL)
