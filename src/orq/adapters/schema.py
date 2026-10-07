@@ -16,11 +16,15 @@ _HUMAN = {
     "type": ["object", "null"],
     "properties": {
         "decision_type": {"type": "string", "enum": list(DECISION_TYPES)},
+        # Phase 6: the owner decides from the phone, so the question travels with its context and consequences.
+        "context": {"type": "string"},
         "question": {"type": "string"},
         "options": {"type": "array", "items": {"type": "string"}},
+        "option_details": {"type": "array", "items": {"type": "string"}},
         "recommendation": {"type": "integer"},
+        "recommendation_reason": {"type": "string"},
     },
-    "required": ["decision_type", "question", "options", "recommendation"],
+    "required": ["decision_type", "context", "question", "options", "option_details", "recommendation", "recommendation_reason"],
     "additionalProperties": False,
 }
 

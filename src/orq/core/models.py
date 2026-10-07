@@ -82,3 +82,7 @@ class Decision:
     answered_via: str | None = None  # whatsapp | dashboard | cli
     created_at: str | None = None
     answered_at: str | None = None
+    # Phase 6: what the owner needs to decide without opening anything else.
+    context: str = ""  # what the run was doing and why it stopped
+    option_details: list[str] = field(default_factory=list)  # one consequence per option, same order
+    recommendation_reason: str = ""

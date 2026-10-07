@@ -15,15 +15,50 @@ def run(**overrides) -> RunRecord:
     return RunRecord(**base)
 
 
-def test_format_decision_matches_spec_shape() -> None:
+def test_format_decision_without_details_keeps_the_short_shape() -> None:
     text = format_decision(decision(), run())
     assert text.splitlines() == [
         "*[orq] D7K2 · repo-x · iteration 6*",
-        "Business decision (reviewer): Is the discount applied before or after tax?",
+        "Business decision (reviewer)",
+        "Question: Is the discount applied before or after tax?",
         "1. Before (recommended)",
         "2. After",
         "Reply: D7K2 <number>  or  D7K2 <free text>",
     ]
+
+
+def test_format_decision_with_context_consequences_and_reason() -> None:
+    d = decision(context="Milestone 2 adds the invoice total. The task says 'apply the discount' but not when.",
+                 option_details=["total = (price - discount) * 1.1", "total = price * 1.1 - discount"],
+                 recommendation_reason="most invoices in the repo already discount the net price")
+
+    text = format_decision(d, run(), milestone="2/3")
+
+    assert text.splitlines() == [
+        "*[orq] D7K2 · repo-x · iteration 6 · milestone 2/3*",
+        "Business decision (reviewer)",
+        "Context: Milestone 2 adds the invoice total. The task says 'apply the discount' but not when.",
+        "Question: Is the discount applied before or after tax?",
+        "1. Before (recommended): total = (price - discount) * 1.1",
+        "2. After: total = price * 1.1 - discount",
+        "Recommended: 1, because most invoices in the repo already discount the net price",
+        "Reply: D7K2 <number>  or  D7K2 <free text>",
+    ]
+
+
+def test_long_context_is_cut_first_to_fit_the_cap() -> None:
+    d = decision(context="word " * 1000, option_details=["a", "b"], recommendation_reason="r")
+
+    text = format_decision(d, run())
+
+    assert len(text) <= 1500 and "(more in the dashboard)" in text
+    assert "Question: Is the discount" in text and text.endswith("Reply: D7K2 <number>  or  D7K2 <free text>")
+
+
+def test_answered_elsewhere_notice() -> None:
+    from orq.notify.messages import format_answered_elsewhere
+    d = decision(status="answered", answer="Before", answered_via="dashboard")
+    assert format_answered_elsewhere(d) == "[orq] D7K2 answered on the dashboard: Before. Nothing to do here."
 
 
 def test_format_destructive_decision_asks_for_approve_or_deny() -> None:

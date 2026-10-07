@@ -56,20 +56,46 @@ def parse_reply(raw: str) -> Reply:
     return Reply("unknown", text=raw)
 
 
-def format_decision(decision: Decision, run: RunRecord) -> str:
+MESSAGE_CAP = 1500  # WhatsApp shows long messages fine, but past this the decision stops being readable on a phone
+_VIA = {"dashboard": "the dashboard", "cli": "the command line", "terminal": "the terminal", "whatsapp": "WhatsApp"}
+
+
+def format_decision(decision: Decision, run: RunRecord, *, milestone: str | None = None) -> str:
+    """Header, context, question, options with their consequence, recommendation with its reason, reply line.
+
+    Capped at MESSAGE_CAP characters: the context is cut first; the dashboard always shows everything.
+    """
     repo = run.repo.split("/")[-1]
     label = _TYPE_LABELS.get(decision.decision_type, decision.decision_type)
-    lines = [f"*[orq] {decision.decision_id} · {repo} · iteration {run.iteration}*", f"{label} ({decision.source}): {decision.question.strip()}"]
+    header = f"*[orq] {decision.decision_id} · {repo} · iteration {run.iteration}" + (f" · milestone {milestone}" if milestone else "") + "*"
+    body = [f"Question: {decision.question.strip()}"]
     for index, option in enumerate(decision.options):
         mark = " (recommended)" if decision.recommendation == index else ""
-        lines.append(f"{index + 1}. {option}{mark}")
+        detail = decision.option_details[index].strip() if index < len(decision.option_details) else ""
+        body.append(f"{index + 1}. {option}{mark}" + (f": {detail}" if detail else ""))
+    rec = decision.recommendation
+    if decision.recommendation_reason.strip() and rec is not None and 0 <= rec < len(decision.options):
+        body.append(f"Recommended: {rec + 1}, because {decision.recommendation_reason.strip()}")
     if decision.destructive:
-        lines.append(f"Reply: APPROVE {decision.decision_id}  or  DENY {decision.decision_id}")
+        body.append(f"Reply: APPROVE {decision.decision_id}  or  DENY {decision.decision_id}")
     elif decision.options:
-        lines.append(f"Reply: {decision.decision_id} <number>  or  {decision.decision_id} <free text>")
+        body.append(f"Reply: {decision.decision_id} <number>  or  {decision.decision_id} <free text>")
     else:
-        lines.append(f"Reply: {decision.decision_id} <free text>")
-    return "\n".join(lines)
+        body.append(f"Reply: {decision.decision_id} <free text>")
+    head = [header, f"{label} ({decision.source})"]
+    context = " ".join(decision.context.split())
+    if context:
+        room = MESSAGE_CAP - len("\n".join(head + body)) - len("\nContext: ")
+        suffix = " (more in the dashboard)"
+        if len(context) > room:
+            context = context[: max(0, room - len(suffix))].rstrip() + suffix
+        head.append(f"Context: {context}")
+    return "\n".join(head + body)
+
+
+def format_answered_elsewhere(decision: Decision) -> str:
+    via = _VIA.get(decision.answered_via or "", decision.answered_via or "another channel")
+    return f"[orq] {decision.decision_id} answered on {via}: {decision.answer}. Nothing to do here."
 
 
 def format_run_state(run: RunRecord, *, pr_url: str | None = None, reason: str | None = None) -> str:

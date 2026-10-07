@@ -5,6 +5,15 @@ from __future__ import annotations
 from orq.core.task import Task
 from orq.verify.checks import CheckResult
 
+# Phase 6: the owner answers from a phone, without the repository at hand; a bare question cannot be decided.
+HUMAN_GUIDE = """How to ask the owner (fill every field; the owner reads it on a phone and cannot open the repository):
+- context: 2 to 4 sentences. What the run was doing (milestone, file, behaviour), what you found, quoting the evidence (file and function, error text, the acceptance criterion in question), and what stays blocked until the answer.
+- question: one sentence that the owner can answer by picking an option.
+- options: 2 to 4 short labels.
+- option_details: one sentence per option, in the same order: what will happen in the code and for the user of the software if the owner picks it.
+- recommendation: index of the option you recommend; recommendation_reason: one sentence explaining why.
+- Plain language. Explain any repository-specific name in a few words."""
+
 IMPLEMENTER_RULES = """You are the implementer in an automated loop. A separate reviewer reads your work after every turn.
 Standing rules:
 - Work only inside the current directory (the git worktree). Do not commit, push, create branches or touch git history; the orchestrator commits for you.
@@ -13,7 +22,8 @@ Standing rules:
 - Never add secrets, tokens or credentials to the repo.
 - A tool call may be denied by the orq guard. Follow the denial text exactly: never work around a denied action with another command or tool.
 - Finish your turn with a short plain-text report: what you changed, what is left, anything the reviewer should look at.
-- On a business decision or real ambiguity, do not guess and do not edit files. Stop and end your final message with a fenced block tagged orq-decision containing one JSON object with keys decision_type ("business" | "ambiguity" | "risk" | "blocked"), question, options (array of strings) and recommendation (index into options). Nothing may follow the block."""
+- On a business decision or real ambiguity, do not guess and do not edit files. Stop and end your final message with a fenced block tagged orq-decision containing one JSON object with keys decision_type ("business" | "ambiguity" | "risk" | "blocked"), context, question, options (array of strings), option_details (array of strings, one per option), recommendation (index into options) and recommendation_reason. Nothing may follow the block.
+""" + HUMAN_GUIDE
 
 REVIEWER_RULES = """You are the reviewer in an automated implementer/reviewer loop. You have read-only access to the repository in the current directory; inspect it directly.
 Standing rules:
@@ -22,10 +32,11 @@ Standing rules:
 - The task is split into milestones (see the plan). status done means the CURRENT milestone's "done when" holds, the check command passes and there is no blocker or major issue left. On the last milestone, done also requires every acceptance criterion of the task. If you list a blocker or major issue, status must be continue with a next_prompt that fixes it.
 - Generated or build artifacts (caches, compiled files, editor files) committed to the repo are a major issue.
 - The orchestrator commits, pushes, opens the pull request, waits for CI and merges. Never ask the implementer to do any of that, and never count a missing PR or merge as an issue.
-- The check command result below was produced by the orchestrator in the real environment. Do not re-run it; your sandbox may lack python or other tools, and that is never an issue to report.
+- The check command result below was produced by the orchestrator in the real environment and is authoritative. Do not re-run it, and never report tool availability in your sandbox as an issue.
 - Otherwise status continue, with next_prompt: concrete, self-contained instructions for the implementer's next turn. Mention file names.
 - Keep summary to a few sentences. List real problems in issues with a severity.
-- human must be null unless status is needs_human."""
+- human must be null unless status is needs_human.
+""" + HUMAN_GUIDE
 
 
 PLANNER_RULES = """You are the planner for an automated implementer/reviewer loop. You have read-only access to the repository in the current directory; read it before planning.
@@ -35,7 +46,8 @@ Standing rules:
 - Tag difficulty: "hard" for design, debugging or anything touching behaviour that is easy to get wrong; "mechanical" for boilerplate, tests that mirror existing ones, docs, renames.
 - Stay inside the task's scope and constraints. Never plan removals of features, files or tests the task does not ask for.
 - On a business decision or real ambiguity that changes the plan, do not guess: status needs_human with the question and options. Otherwise status plan.
-- human must be null unless status is needs_human; milestones must be empty when status is needs_human."""
+- human must be null unless status is needs_human; milestones must be empty when status is needs_human.
+""" + HUMAN_GUIDE
 
 FINAL_REVIEW_NOTE = ("## Final review before merge\nThis is the merge gate. All milestones are reported done. Answer done only when every "
                      "acceptance criterion of the task holds in the repository and the check and CI results below pass. "
@@ -72,7 +84,8 @@ def plan_markdown(plan: dict) -> str:
 
 
 def build_planner_prompt(task: Task, *, decisions: str, feedback: str | None) -> str:
-    parts = [_task_block(task)]
+    # The rules go first: until Phase 6 they were defined but never sent (the CLIs get no other system prompt).
+    parts = [PLANNER_RULES, _task_block(task)]
     if decisions.strip():
         parts.append("## Owner decisions so far\n" + decisions.strip())
     if feedback:
@@ -123,7 +136,7 @@ def build_reviewer_prompt(task: Task, *, iteration: int, milestone: str | None, 
     check_block = (
         f"exit code: {check.exit_code}, ok: {check.ok}, timed out: {check.timed_out}\n```\n{check.output.strip()[-4000:]}\n```"
     )
-    parts = [_task_block(task)]
+    parts = [REVIEWER_RULES, _task_block(task)]
     block = plan_block(plan, milestone_index)
     if block:
         parts.append(block)

@@ -178,7 +178,8 @@ def test_outbound_sends_pending_decision_once_then_reminds(home: OrqPaths) -> No
     fake = FakeClient()
     now = [1000.0]
     t = tasks(home, store, fake, clock=lambda: now[0])
-    assert t.outbound_once() == 1 and "*[orq] DBBBB · sandbox · iteration 2*" in fake.sent[0] and "2. after (recommended)" in fake.sent[0]
+    assert t.outbound_once() == 1 and "*[orq] DBBBB · sandbox · iteration 2 · milestone 1/1*" in fake.sent[0]
+    assert "2. after (recommended)" in fake.sent[0]
     assert t.outbound_once() == 0
     now[0] += 3 * 3600 + 1
     assert t.outbound_once() == 1 and len(fake.sent) == 2
@@ -480,3 +481,37 @@ def test_task_with_models_is_validated(home: OrqPaths, tmp_path: Path) -> None:
     assert ok["errors"] == [] and "## Models\nreviewer: gpt-5.5\nfinal_effort: high" in ok["markdown"]
     bad = c.post("/api/tasks/preview", json={"project": "owner/a", "fields": {**FIELDS, "models": {"reviewer": "gpt-5.5", "final_effort": "max"}}}).json()
     assert bad["errors"] and "does not support max" in bad["errors"][0]
+
+
+def test_outbound_tells_when_a_decision_was_answered_on_another_channel(home: OrqPaths) -> None:
+    from orq.core.answers import record_answer
+    store = seed(home, decision=business())
+    fake = FakeClient()
+    t = tasks(home, store, fake)
+    t.outbound_once()                                        # the question went to WhatsApp
+    record_answer(store, home, "DBBBB", "0", via="dashboard")
+
+    assert t.outbound_once() == 1 and fake.sent[-1] == "[orq] DBBBB answered on the dashboard: before. Nothing to do here."
+    assert t.outbound_once() == 0
+
+
+def test_answers_given_on_whatsapp_or_never_sent_are_not_echoed(home: OrqPaths) -> None:
+    from orq.core.answers import record_answer
+    store = seed(home, decision=business())
+    fake = FakeClient()
+    t = tasks(home, store, fake)
+    record_answer(store, home, "DBBBB", "0", via="dashboard")  # answered before it was ever sent
+
+    assert t.outbound_once() == 0 and fake.sent == []
+
+
+def test_failed_and_aborted_carry_their_reason(home: OrqPaths) -> None:
+    store = seed(home, state=RunState.IMPLEMENTING, phase="implement")
+    fake = FakeClient()
+    t = tasks(home, store, fake)
+    RunDir(home.run_dir("RAAAAA")).event("state", state="FAILED", reason="max iterations (3) reached")
+    store.set_state("RAAAAA", RunState.FAILED)
+
+    t.outbound_once()
+
+    assert "RAAAAA · sandbox · FAILED" in fake.sent[-1] and fake.sent[-1].endswith("max iterations (3) reached")

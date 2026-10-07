@@ -32,7 +32,7 @@ def record_answer(store: Store, paths: OrqPaths, decision_id: str, text: str, *,
         raise AnswerError("empty answer")
     store.answer_decision(decision_id, answer=value, answered_via=via)
     rundir = RunDir(paths.run_dir(decision.run_id))
-    rundir.append_decision(decision_id, decision.question, value)
+    rundir.append_decision(decision_id, decision.question, value, decision.context)
     rundir.event("answer", decision_id=decision_id, answer=value, via=via)
     answered = store.get_decision(decision_id)
     assert answered is not None

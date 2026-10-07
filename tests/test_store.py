@@ -195,3 +195,14 @@ def test_project_settings_round_trip_and_migration(tmp_path: Path) -> None:
     assert store.get_project("o/a").settings == {}
     store.update_project("o/a", settings={"reviewer.codex_model": "gpt-6-sol"})
     assert store.get_project("o/a").settings == {"reviewer.codex_model": "gpt-6-sol"}
+
+
+def test_decision_details_round_trip(store: Store) -> None:
+    store.create_run(make_run())
+    store.add_decision(Decision(decision_id="DX1", run_id="R1", source="reviewer", decision_type="business", question="q?",
+                                options=["a", "b"], recommendation=0, context="ctx", option_details=["does a", "does b"],
+                                recommendation_reason="because"))
+
+    d = store.get_decision("DX1")
+
+    assert (d.context, d.option_details, d.recommendation_reason) == ("ctx", ["does a", "does b"], "because")

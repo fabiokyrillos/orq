@@ -407,7 +407,7 @@ def test_diff_rule_violation_denied_resets_worktree(env) -> None:
 
     assert final is RunState.DONE
     guard = [d for d in asked if d.source == "guard"]
-    assert guard and "deleted_file" in guard[0].question and guard[0].destructive
+    assert guard and "deleted_file" in guard[0].context and guard[0].destructive
     assert (runner.worktree / "README.md").exists()            # the reset restored it
     assert "rejected these changes" in implementer.prompts[1]
     assert len(reviewer.prompts) == 2                           # iteration 1 was not reviewed; iteration 2 plus the final review
@@ -540,7 +540,7 @@ def test_agent_error_becomes_retry_decision(env) -> None:
     runner = make(implementer, FakeReviewer([review("done", None)]), human=lambda d: asked.append(d) or "retry")
 
     assert asyncio.run(runner.execute()) is RunState.DONE
-    assert asked[0].source == "orq" and "529" in asked[0].question and implementer.calls == 2
+    assert asked[0].source == "orq" and "529" in asked[0].context and implementer.calls == 2
 
 
 def test_agent_error_abort(env) -> None:
@@ -1147,4 +1147,44 @@ def test_project_protected_paths_reach_the_hook_and_the_diff_rules(env) -> None:
     guard = json.loads((runner.rundir.path / "guard.json").read_text(encoding="utf-8"))
     assert guard["protected_paths"] == ["greeting*.txt"]
     assert asyncio.run(runner.execute()) is RunState.AWAITING_HUMAN  # greeting1.txt is now protected
-    assert "protected_path" in runner.store.pending_decisions(runner.run_id)[0].question
+    assert "protected_path" in runner.store.pending_decisions(runner.run_id)[0].context
+
+
+# decisions with content (Phase 6)
+
+def test_reviewer_question_keeps_context_consequences_and_reason(env) -> None:
+    make, paths, _ = env
+    human = {"decision_type": "business", "context": "Milestone 1 adds greeting.txt; the task does not say the language.",
+             "question": "English or Portuguese?", "options": ["English", "Portuguese"],
+             "option_details": ["greeting.txt says hello", "greeting.txt says olá"], "recommendation": 0,
+             "recommendation_reason": "the README is in English"}
+    runner = make(FakeImplementer([ok()]), FakeReviewer([review("needs_human", None, human=human)]), human=None)
+
+    assert asyncio.run(runner.execute()) is RunState.AWAITING_HUMAN
+    d = runner.store.pending_decisions(runner.run_id)[0]
+    assert d.context.startswith("Milestone 1 adds") and d.option_details == ["greeting.txt says hello", "greeting.txt says olá"]
+    assert d.recommendation_reason == "the README is in English"
+
+
+def test_guard_decision_explains_the_rule_and_the_milestone(env) -> None:
+    make, paths, _ = env
+    runner = make(FakeImplementer([denied("git reset --hard")]), FakeReviewer([review("continue", "go")]), human=None)
+
+    asyncio.run(runner.execute())
+
+    d = runner.store.pending_decisions(runner.run_id)[0]
+    assert d.question == "Allow this action once: Bash: git reset --hard?"
+    assert d.context.startswith('While working on milestone "the whole task", the implementer tried to run `Bash: git reset --hard`')
+    assert "throws away uncommitted changes" in d.context and len(d.option_details) == 2 and d.recommendation_reason
+
+
+def test_plan_approval_shows_goals_and_done_when(env) -> None:
+    make, paths, _ = env
+    task = TASK.replace("## Plan approval\nskip", "## Plan approval\nrequired")
+    runner = make(FakeImplementer([]), FakeReviewer([]), human=None, task_text=task,
+                  planner=FakePlanner([plan(("Add greeting", "mechanical"), ("Add tests", "hard"))]))
+
+    assert asyncio.run(runner.execute()) is RunState.AWAITING_PLAN_APPROVAL
+    d = runner.store.pending_decisions(runner.run_id)[0]
+    assert "1. Add greeting [mechanical]: goal of Add greeting Done when: Add greeting is in place" in d.context
+    assert d.context.startswith("the plan") and d.option_details[1].startswith("the planner plans again")

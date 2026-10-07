@@ -21,6 +21,7 @@ from orq.adapters.base import Agent, AgentResult
 from orq.adapters.schema import PLAN_CONTRACT, REVIEW_CONTRACT, validate_plan, validate_review
 from orq.config import Config, GuardConfig
 from orq.core.answers import record_answer
+from orq.core import decision_text
 from orq.core.checkpoint import Checkpoint
 from orq.core.hygiene import drop_orchestrator_milestones, review_complains_about_sandbox, strip_sandbox_complaints
 from orq.core.models import Decision, RunState, new_decision_id
@@ -35,7 +36,7 @@ from orq.core.ratelimit import claude_reset_time
 from orq.core.task import Task, parse_task
 from orq.git.manager import GitManager
 from orq.guard.diff_rules import evaluate_staged
-from orq.guard.rules import action_key, describe_action
+from orq.guard.rules import action_key, classify, describe_action
 from orq.guard.settings import write_hook_settings
 from orq.paths import OrqPaths
 from orq.store.db import Store
@@ -353,7 +354,8 @@ class Runner:
             self._raise_decision("planner", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="planner",
                 decision_type=str(h.get("decision_type", "ambiguity")), question=str(h.get("question", "")),
-                options=[str(o) for o in h.get("options", [])], recommendation=h.get("recommendation")), payload={})
+                options=[str(o) for o in h.get("options", [])], recommendation=h.get("recommendation"),
+                **decision_text.from_model(h)), payload={})
             return
         milestones, dropped = drop_orchestrator_milestones(plan["milestones"])
         if dropped:
@@ -365,11 +367,11 @@ class Runner:
         (self.rundir.path / "PLAN.md").write_text(plan_markdown(self.cp.plan), encoding="utf-8")
         self.rundir.event("plan", milestones=[(m["title"], m["difficulty"]) for m in milestones], summary=plan.get("summary", ""))
         if self.task.plan_approval == "required":
-            titles = "\n".join(f"{i + 1}. [{m['difficulty']}] {m['title']}" for i, m in enumerate(milestones))
             self._raise_decision("plan_approval", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="planner", decision_type="business",
-                question=f"Plan proposed ({len(milestones)} milestones):\n{titles}\nApprove it, or answer with what to change.",
-                options=["approve", "revise"], recommendation=0), payload={}, state=RunState.AWAITING_PLAN_APPROVAL)
+                question=f"Approve this plan ({len(milestones)} milestones), or answer with what to change?",
+                options=["approve", "revise"], recommendation=0, **decision_text.plan_approval(self.cp.plan)),
+                payload={}, state=RunState.AWAITING_PLAN_APPROVAL)
             return
         self._next_iteration()
 
@@ -420,7 +422,8 @@ class Runner:
             self._raise_decision("implementer", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="implementer",
                 decision_type=str(d.get("decision_type", "ambiguity")), question=str(d.get("question", "")),
-                options=[str(o) for o in d.get("options", [])], recommendation=d.get("recommendation")), payload={})
+                options=[str(o) for o in d.get("options", [])], recommendation=d.get("recommendation"),
+                **decision_text.from_model(d)), payload={})
             return
         self._set_phase("verify")
 
@@ -436,7 +439,7 @@ class Runner:
             self._raise_decision("secret", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="guard", decision_type="risk",
                 question=f"gitleaks found secrets: {hits}. Fix them in the worktree, then answer 'rescan', or answer 'abort'.",
-                options=["rescan", "abort"], recommendation=0), payload={})
+                options=["rescan", "abort"], recommendation=0, **decision_text.secret(scan.findings)), payload={})
             return
         if not self.cp.diff_approved:
             eff = self._effective()
@@ -447,8 +450,8 @@ class Runner:
                 self.rundir.event("diff_rules", iteration=it, violations=[str(v) for v in violations])
                 self._raise_decision("guard_diff", Decision(
                     decision_id=new_decision_id(), run_id=self.run_id, source="guard", decision_type="risk", destructive=True,
-                    question=f"The diff guard flagged these changes:\n{listing}\nAllow them?", options=["approve", "deny"],
-                    recommendation=1), payload={"listing": listing})
+                    question="Keep these changes flagged by the diff guard?", options=["approve", "deny"], recommendation=1,
+                    **decision_text.guard_diff(violations, self.git.staged_numstat(self.worktree))), payload={"listing": listing})
                 return
         if self.cp.denied_actions and not self.git.staged_files(self.worktree):
             # The implementer stopped to ask for a destructive action and changed nothing: nothing to check or review.
@@ -499,7 +502,8 @@ class Runner:
             self._raise_decision("reviewer", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="reviewer",
                 decision_type=str(h.get("decision_type", "ambiguity")), question=str(h.get("question", "")),
-                options=[str(o) for o in h.get("options", [])], recommendation=h.get("recommendation")), payload={})
+                options=[str(o) for o in h.get("options", [])], recommendation=h.get("recommendation"),
+                **decision_text.from_model(h)), payload={})
             return
         serious = [i for i in review.get("issues", []) if i.get("severity") in ("blocker", "major")]
         if status == "done" and serious:
@@ -529,7 +533,8 @@ class Runner:
             self._raise_decision("progress", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
                 question=f"No progress ({rule.rule}): {rule.detail}. What now?", options=["continue", target, "abort"],
-                recommendation=1), payload={"rollback_to": rule.rollback_to, "target": target})
+                recommendation=1, **decision_text.no_progress(rule.rule, rule.detail, target, list(self.cp.summaries.values()))),
+                payload={"rollback_to": rule.rollback_to, "target": target})
             return
         self._after_review()
 
@@ -623,12 +628,13 @@ class Runner:
             self._raise_decision("ci_none", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="risk",
                 question=f"No GitHub checks appeared on PR #{self.cp.pr_number} within the grace period. Merge without CI?",
-                options=["merge without CI", "abort"], recommendation=1), payload={})
+                options=["merge without CI", "abort"], recommendation=1, **decision_text.ci_none(self.cp.pr_number)), payload={})
         else:
             self._raise_decision("ci_timeout", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
                 question=f"GitHub checks on PR #{self.cp.pr_number} did not finish within the timeout. Keep waiting?",
-                options=["keep waiting", "abort"], recommendation=0), payload={})
+                options=["keep waiting", "abort"], recommendation=0, **decision_text.ci_timeout(self.cp.pr_number, status.checks)),
+                payload={})
 
     def _gate_round_failed(self, next_prompt: str) -> None:
         """CI failed or the final review was not done: one more implementer iteration, then the gate restarts."""
@@ -639,7 +645,9 @@ class Runner:
                 decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
                 question=f"The merge gate failed {self.cp.gate_rounds} times (limit {self.config.merge.max_gate_rounds}). "
                          f"Last reason: {next_prompt[:300]}. Keep going or abort?",
-                options=["keep going", "abort"], recommendation=1), payload={"next_prompt": next_prompt})
+                options=["keep going", "abort"], recommendation=1,
+                **decision_text.gate_rounds(self.cp.gate_rounds, self.config.merge.max_gate_rounds, next_prompt)),
+                payload={"next_prompt": next_prompt})
             return
         self.cp.outcome = {"next_prompt": next_prompt, "milestone": self.cp.outcome.get("milestone"), "done": False}
         self._next_iteration()
@@ -667,7 +675,8 @@ class Runner:
             self._raise_decision("reviewer", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="reviewer",
                 decision_type=str(h.get("decision_type", "ambiguity")), question=str(h.get("question", "")),
-                options=[str(o) for o in h.get("options", [])], recommendation=h.get("recommendation")), payload={})
+                options=[str(o) for o in h.get("options", [])], recommendation=h.get("recommendation"),
+                **decision_text.from_model(h)), payload={})
             return
         serious = [i for i in review.get("issues", []) if i.get("severity") in ("blocker", "major")]
         if review["status"] == "done" and not serious:
@@ -725,8 +734,8 @@ class Runner:
             kind = "rate limit" if result.error_kind == "rate_limit" else result.error_kind
             self._raise_decision("error", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
-                question=f"{role} failed ({kind}): {(result.error or '')[:500]}. Retry or abort?", options=["retry", "abort"],
-                recommendation=0), payload={"phase": self.cp.phase})
+                question=f"{role} failed ({kind}). Retry or abort?", options=["retry", "abort"],
+                recommendation=0, **decision_text.agent_error(role, str(kind), result.error or "")), payload={"phase": self.cp.phase})
             raise _Yield()
 
     def _persist_router_state(self) -> None:
@@ -747,7 +756,9 @@ class Runner:
             tool = str(denial.get("tool_name", ""))
             tool_input = denial.get("tool_input") or {}
             key = action_key(tool, tool_input)
-            seen.setdefault(key, {"key": key, "tool_name": tool, "tool_input": tool_input, "description": describe_action(tool, tool_input)})
+            violation = classify(tool, tool_input, worktree=self.worktree, protected_paths=self._effective()["git.protected_paths"])
+            seen.setdefault(key, {"key": key, "tool_name": tool, "tool_input": tool_input, "description": describe_action(tool, tool_input),
+                                  "rule": violation.rule if violation else None})
         return list(seen.values())
 
     # decisions
@@ -889,8 +900,9 @@ class Runner:
         action, *remaining = self.cp.denied_actions
         self._raise_decision("guard_pre", Decision(
             decision_id=new_decision_id(), run_id=self.run_id, source="guard", decision_type="risk", destructive=True,
-            question=f"The implementer tried a destructive action: {action['description']}. Allow it once?",
-            options=["approve", "deny"], recommendation=1), payload={"action": action, "remaining": remaining})
+            question=f"Allow this action once: {action['description']}?", options=["approve", "deny"], recommendation=1,
+            **decision_text.guard_pre(action["description"], action.get("rule"), self._current_milestone())),
+            payload={"action": action, "remaining": remaining})
 
     # rollback
 

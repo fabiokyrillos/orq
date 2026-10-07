@@ -82,7 +82,10 @@ SELECT repo, substr(repo, instr(repo, '/') + 1), min(created_at) FROM runs {wher
 """
 _PROJECT_FIELDS = ("name", "base_branch", "check_command", "max_concurrent", "local_path", "settings")
 # Columns added after a table first shipped: (table, column, definition).
-_MIGRATIONS = (("projects", "settings", "TEXT NOT NULL DEFAULT '{}'"),)
+_MIGRATIONS = (("projects", "settings", "TEXT NOT NULL DEFAULT '{}'"),
+               ("decisions", "context", "TEXT NOT NULL DEFAULT ''"),
+               ("decisions", "option_details", "TEXT NOT NULL DEFAULT '[]'"),
+               ("decisions", "recommendation_reason", "TEXT NOT NULL DEFAULT ''"))
 
 
 def _now() -> str:
@@ -252,10 +255,13 @@ class Store:
 
     def add_decision(self, decision: Decision) -> None:
         self._conn.execute(
-            "INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO decisions (decision_id, run_id, source, decision_type, question, options, recommendation, destructive, "
+            "status, answer, answered_via, created_at, answered_at, context, option_details, recommendation_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (decision.decision_id, decision.run_id, decision.source, decision.decision_type, decision.question,
              json.dumps(decision.options), decision.recommendation, int(decision.destructive), decision.status,
-             decision.answer, decision.answered_via, _now(), decision.answered_at),
+             decision.answer, decision.answered_via, _now(), decision.answered_at, decision.context,
+             json.dumps(decision.option_details), decision.recommendation_reason),
         )
         self._conn.commit()
 
@@ -293,6 +299,15 @@ class Store:
         self._conn.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, value))
         self._conn.commit()
 
+    def answered_elsewhere(self, channel: str) -> list[Decision]:
+        """Decisions sent on `channel`, then answered on another one, not yet announced there (kind decision_answered)."""
+        rows = self._conn.execute(
+            "SELECT d.* FROM decisions d JOIN notifications n ON n.kind = 'decision' AND n.key = d.decision_id AND n.channel = ? "
+            "WHERE d.status = 'answered' AND coalesce(d.answered_via, '') != ? AND NOT EXISTS (SELECT 1 FROM notifications a "
+            "WHERE a.kind = 'decision_answered' AND a.key = d.decision_id AND a.channel = ?) ORDER BY d.answered_at",
+            (channel, channel, channel)).fetchall()
+        return [_decision_from_row(r) for r in rows]
+
     def expire_pending(self, run_id: str) -> None:
         """A finished run's open questions can no longer be acted on."""
         self._conn.execute("UPDATE decisions SET status = 'expired' WHERE run_id = ? AND status = 'pending'", (run_id,))
@@ -322,4 +337,5 @@ def _decision_from_row(row: sqlite3.Row) -> Decision:
     data = dict(row)
     data["options"] = json.loads(data["options"])
     data["destructive"] = bool(data["destructive"])
+    data["option_details"] = json.loads(data.get("option_details") or "[]")
     return Decision(**data)

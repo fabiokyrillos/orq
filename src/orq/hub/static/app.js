@@ -374,7 +374,10 @@ async function runPage(id, tab) {
   const decisions = d.decisions.map(x => `
     <div class="card decision ${x.destructive ? 'destructive' : ''}" data-decision="${x.decision_id}">
       <div><b class="mono">${x.decision_id}</b> <span class="muted">${esc(x.source)} · ${esc(x.decision_type)}${x.destructive ? ' · destructive' : ''}</span></div>
-      <div class="q">${esc(x.question)}</div>
+      ${x.context ? `<div class="ctx">${esc(x.context)}</div>` : ''}
+      <div class="q"><b>${esc(x.question)}</b></div>
+      ${x.option_details && x.option_details.length ? `<ol class="opts" start="0">${x.options.map((o, i) => `<li><b>${esc(o)}</b>${x.option_details[i] ? `: ${esc(x.option_details[i])}` : ''}</li>`).join('')}</ol>` : ''}
+      ${x.recommendation_reason && x.recommendation != null ? `<div class="hint">Recommended: ${esc(x.options[x.recommendation] ?? '')}, because ${esc(x.recommendation_reason)}</div>` : ''}
       <div>${x.options.map((o, i) => `<button data-answer="${esc(o)}" class="${x.destructive && o === 'deny' ? 'danger' : ''}">${i}. ${esc(o)}${x.recommendation === i ? ' ★' : ''}</button>`).join('')}</div>
       <div style="margin-top:8px;display:flex;gap:6px"><input type="text" placeholder="free text answer"><button data-send>Send</button></div>
     </div>`).join('');

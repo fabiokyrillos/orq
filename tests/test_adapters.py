@@ -401,3 +401,12 @@ def test_claude_reviewer_plan_contract(record, tmp_path, monkeypatch) -> None:
     assert json.loads(argv[argv.index("--json-schema") + 1]) == PLAN_SCHEMA
     assert argv[argv.index("--model") + 1] == "sonnet"
     assert not result.ok and result.error_kind == "invalid_output"  # the fake answers a review, not a plan
+
+
+def test_human_object_asks_for_context_consequences_and_reason() -> None:
+    from orq.adapters.schema import PLAN_SCHEMA
+    for schema in (REVIEW_SCHEMA, PLAN_SCHEMA):
+        human = schema["properties"]["human"]
+        assert {"context", "option_details", "recommendation_reason"} <= set(human["required"])
+        assert human["properties"]["option_details"] == {"type": "array", "items": {"type": "string"}}
+        assert human["additionalProperties"] is False and set(human["required"]) == set(human["properties"])

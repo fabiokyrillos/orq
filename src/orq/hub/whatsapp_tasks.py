@@ -12,7 +12,9 @@ from orq.core.answers import AnswerError, record_answer
 from orq.core.checkpoint import Checkpoint
 from orq.core.control import ControlError, abort_run, request_pause, spawn_resume
 from orq.core.models import Decision, RunState
-from orq.notify.messages import DESTRUCTIVE_HINT, HINT, format_decision, format_run_state, format_status, parse_reply
+from orq.core.summary import read_events
+from orq.notify.messages import (DESTRUCTIVE_HINT, HINT, format_answered_elsewhere, format_decision, format_run_state, format_status,
+                                 parse_reply)
 from orq.notify.whatsapp import WhatsAppClient
 from orq.paths import OrqPaths
 from orq.store.db import Store
@@ -64,9 +66,14 @@ class WhatsAppTasks:
             run = self.store.get_run(decision.run_id)
             if run is None:
                 continue
-            self.client.send(format_decision(decision, run))
+            self.client.send(format_decision(decision, run, milestone=self._milestone(run.run_id)))
             self.store.mark_notified("decision", decision.decision_id, CHANNEL, at=self._clock())
             RunDir(self.paths.run_dir(run.run_id)).event("notified", channel=CHANNEL, decision_id=decision.decision_id, reminder=last is not None)
+            sent += 1
+        for decision in self.store.answered_elsewhere(CHANNEL):
+            # The phone still shows the question; say it is settled so the owner does not answer it again.
+            self.client.send(format_answered_elsewhere(decision))
+            self.store.mark_notified("decision_answered", decision.decision_id, CHANNEL, at=self._clock())
             sent += 1
         for run in self.store.list_runs():
             if run.state not in TERMINAL:
@@ -75,11 +82,23 @@ class WhatsAppTasks:
             if self.store.notified_at("run_state", key, CHANNEL) is not None:
                 continue
             cp = Checkpoint.try_load(self.paths.run_dir(run.run_id) / "state.json")
-            self.client.send(format_run_state(run, pr_url=cp.pr_url if cp else None))
+            self.client.send(format_run_state(run, pr_url=cp.pr_url if cp else None, reason=self._final_reason(run.run_id)))
             self.store.mark_notified("run_state", key, CHANNEL, at=self._clock())
             RunDir(self.paths.run_dir(run.run_id)).event("notified", channel=CHANNEL, state=run.state.value)
             sent += 1
         return sent
+
+    def _milestone(self, run_id: str) -> str | None:
+        cp = Checkpoint.try_load(self.paths.run_dir(run_id) / "state.json")
+        milestones = ((cp.plan or {}).get("milestones") or []) if cp else []
+        return f"{min(cp.milestone_index, len(milestones) - 1) + 1}/{len(milestones)}" if cp and milestones else None
+
+    def _final_reason(self, run_id: str) -> str | None:
+        """Why a run ended: the reason of its last state event (FAILED and ABORTED carry one)."""
+        for event in reversed(read_events(self.paths.run_dir(run_id))):
+            if event.get("type") == "state":
+                return event.get("reason")
+        return None
 
     # inbound
 
