@@ -56,7 +56,9 @@ def build_summary(run_dir: Path) -> dict:
     task = (run_dir / "TASK.md").read_text(encoding="utf-8") if (run_dir / "TASK.md").exists() else ""
     title, repo = _TITLE.search(task), _REPO.search(task)
     cp = Checkpoint.try_load(run_dir / "state.json")
-    states = [e for e in events if e["type"] == "state"]
+    # A queued run has no process until the dispatcher starts it; its `queued` event opens the QUEUED time.
+    states = [e if e["type"] == "state" else {**e, "state": "QUEUED"} for e in events if e["type"] in ("state", "queued")]
+    states = [s for i, s in enumerate(states) if i == 0 or s["state"] != states[i - 1]["state"]]
     final = states[-1] if states else None
     ended = final if final and final["state"] in TERMINAL else None
 

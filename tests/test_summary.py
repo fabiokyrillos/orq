@@ -145,3 +145,18 @@ def test_replay_merges_a_resumed_iteration_and_maps_rollbacks_to_archives(tmp_pa
         ("Plan", ""), ("Iteration 1", "iterations/1"),
         ("Iteration 2 (discarded)", "iterations/2.discarded-20261007T160000"), ("Iteration 2", "iterations/2")]
     assert len(steps[1]["events"]) == 3
+
+
+def test_time_in_the_queue_before_the_process_started_counts_as_queued(tmp_path: Path) -> None:
+    run_dir = tmp_path / "RQ1"
+    run_dir.mkdir()
+    events = [ev("00:00.000", "queued", repo="o/a", title="t"),
+              ev("00:36.000", "resume_spawned", pid=1),
+              ev("00:36.500", "state", state="QUEUED"),
+              ev("00:40.000", "state", state="PLANNING"),
+              ev("01:00.000", "state", state="DONE")]
+    (run_dir / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+
+    s = build_summary(run_dir)
+
+    assert s["time_by_state"] == {"QUEUED": 40, "PLANNING": 20} and s["wall_seconds"] == 60
