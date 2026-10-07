@@ -163,3 +163,25 @@ def test_answered_runs_go_before_fresh_queued_ones(home: OrqPaths) -> None:
 
     assert Dispatcher(store, home, config(global_limit=1), spawn=Spawner()).tick() == [answered]
     assert fresh
+
+
+# editable queue (Phase 6)
+
+def test_queue_order_and_moves(home: OrqPaths) -> None:
+    store = Store(home.db)
+    a = enqueue(home, store, config(), TASK.format(repo="owner/a"))
+    b = enqueue(home, store, config(), TASK.format(repo="owner/b"))
+    c = enqueue(home, store, config(), TASK.format(repo="owner/c"))
+    assert [r.run_id for r in store.queued_runs()] == [a, b, c]
+
+    store.move_in_queue(c, "top")
+    assert [r.run_id for r in store.queued_runs()] == [c, a, b]
+    store.move_in_queue(a, "down")
+    assert [r.run_id for r in store.queued_runs()] == [c, b, a]
+    store.move_in_queue(c, "bottom")
+    store.move_in_queue(b, "up")  # already first: no change
+    assert [r.run_id for r in store.queued_runs()] == [b, a, c]
+
+    spawn = Spawner()
+    Dispatcher(store, home, config(global_limit=1), spawn=spawn).tick()
+    assert spawn.spawned == [b]  # the dispatcher follows the queue order

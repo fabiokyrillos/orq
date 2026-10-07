@@ -65,7 +65,7 @@ class Dispatcher:
         demand = Counter(row["repo"] for row in registered.values())  # held or waiting: both will use a slot
         total = len(registered)
         queued = []
-        for run in reversed(self.store.list_runs()):  # oldest first
+        for run in sorted(self.store.list_runs(), key=lambda r: r.queue_order):  # queue order (oldest first unless moved)
             if run.state not in DISPATCHABLE or run.run_id in registered:
                 continue
             if run.run_id in self._spawned:

@@ -85,7 +85,8 @@ _PROJECT_FIELDS = ("name", "base_branch", "check_command", "max_concurrent", "lo
 _MIGRATIONS = (("projects", "settings", "TEXT NOT NULL DEFAULT '{}'"),
                ("decisions", "context", "TEXT NOT NULL DEFAULT ''"),
                ("decisions", "option_details", "TEXT NOT NULL DEFAULT '[]'"),
-               ("decisions", "recommendation_reason", "TEXT NOT NULL DEFAULT ''"))
+               ("decisions", "recommendation_reason", "TEXT NOT NULL DEFAULT ''"),
+               ("runs", "queue_order", "REAL NOT NULL DEFAULT 0"))
 
 
 def _now() -> str:
@@ -102,6 +103,8 @@ class Store:
             columns = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if column not in columns:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        # Runs from before Phase 6 keep their creation order in the queue.
+        self._conn.execute("UPDATE runs SET queue_order = CAST(strftime('%s', created_at) AS REAL) WHERE queue_order = 0")
         self._conn.execute(_REGISTER_PROJECTS.format(where=""))
         self._conn.commit()
 
@@ -110,9 +113,10 @@ class Store:
     def create_run(self, run: RunRecord) -> None:
         now = _now()
         self._conn.execute(
-            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runs (run_id, repo, task_title, branch, state, iteration, worktree, implementer_session, reviewer_session, "
+            "created_at, updated_at, queue_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (run.run_id, run.repo, run.task_title, run.branch, run.state.value, run.iteration,
-             run.worktree, run.implementer_session, run.reviewer_session, now, now),
+             run.worktree, run.implementer_session, run.reviewer_session, now, now, run.queue_order or time.time()),
         )
         self._conn.execute(_REGISTER_PROJECTS.format(where="WHERE repo = ?"), (run.repo,))
         self._conn.commit()
@@ -169,6 +173,30 @@ class Store:
     def list_runs(self) -> list[RunRecord]:
         rows = self._conn.execute("SELECT * FROM runs ORDER BY created_at DESC, rowid DESC").fetchall()
         return [_run_from_row(r) for r in rows]
+
+    def queued_runs(self) -> list[RunRecord]:
+        """QUEUED runs in the order the dispatcher starts them."""
+        rows = self._conn.execute("SELECT * FROM runs WHERE state = 'QUEUED' ORDER BY queue_order, rowid").fetchall()
+        return [_run_from_row(r) for r in rows]
+
+    def move_in_queue(self, run_id: str, to: str) -> None:
+        """to: top | up | down | bottom. Only QUEUED runs move; the others keep their places."""
+        queued = self.queued_runs()
+        ids = [r.run_id for r in queued]
+        if run_id not in ids:
+            raise ValueError(f"{run_id} is not queued")
+        index = ids.index(run_id)
+        target = {"top": 0, "up": max(0, index - 1), "down": min(len(ids) - 1, index + 1), "bottom": len(ids) - 1}.get(to)
+        if target is None:
+            raise ValueError(f"unknown move {to!r}: top, up, down or bottom")
+        ids.insert(target, ids.pop(index))
+        orders = sorted(r.queue_order for r in queued)  # reuse the same order values, permuted
+        for new_id, order in zip(ids, orders):
+            self._conn.execute("UPDATE runs SET queue_order = ? WHERE run_id = ?", (order, new_id))
+        self._conn.commit()
+
+    def set_task(self, run_id: str, title: str, branch: str) -> None:
+        self._update_run(run_id, task_title=title, branch=branch)
 
     def set_state(self, run_id: str, state: RunState) -> None:
         self._update_run(run_id, state=state.value)

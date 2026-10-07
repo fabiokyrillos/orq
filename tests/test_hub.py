@@ -565,3 +565,26 @@ def time_of_first_event(home: OrqPaths) -> float:
     from datetime import datetime
     first = json.loads((home.run_dir("RAAAAA") / "events.jsonl").read_text(encoding="utf-8").splitlines()[0])
     return datetime.fromisoformat(first["ts"]).timestamp()
+
+
+# Phase 6: editable queue
+
+def test_queue_move_and_edit_endpoints(home: OrqPaths) -> None:
+    c = client(home)
+    c.post("/api/projects", json={"source": "owner/a", "check_command": "pytest"})
+    first = c.post("/api/tasks", json={"project": "owner/a", "markdown": TASK_MD}).json()["run_id"]
+    second = c.post("/api/tasks", json={"project": "owner/a", "markdown": TASK_MD.replace("Add greeting", "Add farewell")}).json()["run_id"]
+
+    assert c.post(f"/api/runs/{second}/move", json={"to": "top"}).status_code == 200
+    assert [r["run_id"] for r in c.get("/api/queue").json()["queued"]] == [second, first]
+
+    edited = TASK_MD.replace("Add greeting", "Add a warm greeting")
+    r = c.put(f"/api/runs/{first}/task", json={"markdown": edited})
+    assert r.status_code == 200 and r.json()["task_title"] == "Add a warm greeting" and r.json()["branch"] == "orq/add-a-warm-greeting"
+    assert (home.run_dir(first) / "TASK.md").read_text(encoding="utf-8") == edited
+    assert Checkpoint.load(home.run_dir(first) / "state.json").branch == "orq/add-a-warm-greeting"
+
+    assert c.put(f"/api/runs/{first}/task", json={"markdown": TASK_MD.replace("owner/a", "owner/b")}).status_code == 400
+    Store(home.db).set_state(first, RunState.PLANNING)
+    assert c.put(f"/api/runs/{first}/task", json={"markdown": edited}).status_code == 409
+    assert c.post(f"/api/runs/{first}/move", json={"to": "up"}).status_code == 409

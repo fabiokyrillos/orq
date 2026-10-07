@@ -77,6 +77,14 @@ class ProjectPatch(BaseModel):
     settings: dict | None = None  # Phase 6 overrides; a None value clears that key
 
 
+class MoveBody(BaseModel):
+    to: str
+
+
+class TaskTextBody(BaseModel):
+    markdown: str
+
+
 class ModelTestBody(BaseModel):
     kind: str
     model: str
@@ -144,7 +152,10 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
-        return (STATIC / "index.html").read_text(encoding="utf-8").replace("__ORQ_TOKEN__", secret)
+        # Versioned asset URLs: after an orq update the browser must not keep the old script from its cache.
+        version = int(max((STATIC / name).stat().st_mtime for name in ("app.js", "style.css")))
+        page = (STATIC / "index.html").read_text(encoding="utf-8").replace("__ORQ_TOKEN__", secret)
+        return page.replace("/static/app.js", f"/static/app.js?v={version}").replace("/static/style.css", f"/static/style.css?v={version}")
 
     @app.get("/api/runs")
     async def runs(project: str | None = None) -> list[dict]:
@@ -293,9 +304,43 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
     @app.get("/api/queue")
     async def queue() -> dict:
         rows = store.slot_usage(alive=dispatcher._alive)
-        queued = [r for r in reversed(store.list_runs()) if r.state is RunState.QUEUED]
+        queued = store.queued_runs()
         return {"limit": config.limits.max_concurrent_runs, "held": sum(1 for r in rows if r["held"]),
                 "slots": rows, "queued": [run_summary(paths, store, r) for r in queued]}
+
+    def queued_or_409(run_id: str) -> RunRecord:
+        run = store.get_run(run_id)
+        if run is None:
+            raise HTTPException(404, f"no run {run_id}")
+        cp = Checkpoint.try_load(paths.run_dir(run_id) / "state.json")
+        if run.state is not RunState.QUEUED or cp is None or cp.phase != "setup" or dispatcher._alive(cp.pid):
+            raise HTTPException(409, f"{run_id} has started; only a queued run that has not started can change")
+        return run
+
+    @app.post("/api/runs/{run_id}/move")
+    async def move(run_id: str, body: MoveBody) -> dict:
+        queued_or_409(run_id)
+        try:
+            store.move_in_queue(run_id, body.to)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return {"ok": True}
+
+    @app.put("/api/runs/{run_id}/task")
+    async def edit_task(run_id: str, body: TaskTextBody) -> dict:
+        run = queued_or_409(run_id)
+        try:
+            task = parse_task(body.markdown)
+        except TaskError as exc:
+            raise HTTPException(400, str(exc))
+        if task.repo != run.repo:
+            raise HTTPException(400, f"the task names {task.repo} but the run belongs to {run.repo}")
+        (paths.run_dir(run_id) / "TASK.md").write_text(body.markdown, encoding="utf-8")
+        cp = Checkpoint.load(paths.run_dir(run_id) / "state.json")
+        cp.branch = f"orq/{task.slug}"  # type: ignore[union-attr]
+        cp.save(paths.run_dir(run_id) / "state.json", pid=0)  # type: ignore[union-attr]
+        store.set_task(run_id, task.title, cp.branch)  # type: ignore[union-attr]
+        return run_summary(paths, store, store.get_run(run_id))  # type: ignore[arg-type]
 
     # summary and replay
 

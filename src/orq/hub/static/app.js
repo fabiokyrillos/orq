@@ -145,11 +145,32 @@ async function queueTab(el, repo) {
     </div>
     <div class="card"><h3 class="muted small">QUEUED, IN ORDER</h3>
       ${mine.length ? `<table><tbody>${mine.map((r, i) => `<tr><td class="muted">${i + 1}</td><td class="id">${r.run_id}</td><td>${esc(r.task_title)}</td>
-        <td class="muted small">${ago(r.created_at)}</td><td><button class="danger" data-cancel="${r.run_id}">Cancel</button></td></tr>`).join('')}</tbody></table>`
+        <td class="muted small">${ago(r.created_at)}</td>
+        <td style="white-space:nowrap"><button data-move="top" data-run-id="${r.run_id}" title="first">⤒</button><button data-move="up" data-run-id="${r.run_id}" title="up">↑</button><button data-move="down" data-run-id="${r.run_id}" title="down">↓</button>
+          <button data-edit="${r.run_id}">Edit</button><button class="danger" data-cancel="${r.run_id}">Cancel</button></td></tr>`).join('')}</tbody></table>`
         : '<div class="muted">Nothing queued.</div>'}
-      <div class="hint">The hub starts queued runs when a slot is free. A run waiting for your answer gives its slot back.</div>
+      <div class="hint">The hub starts queued runs in this order when a slot is free (other projects' runs share the global slots). A run waiting for your answer gives its slot back.</div>
       <span class="msg" id="qmsg"></span>
-    </div>`;
+    </div>
+    <div class="card" id="qedit" hidden><h3 class="muted small">EDIT <span id="qedit-id" class="mono"></span></h3>
+      <textarea id="qedit-md" rows="18"></textarea><div class="errors" id="qedit-err"></div>
+      <button class="primary" id="qedit-save">Save</button><button id="qedit-close">Close</button></div>`;
+  const qmsg = (text, err) => { $('#qmsg').textContent = text; $('#qmsg').className = `msg ${err ? 'err' : ''}`; };
+  $$('[data-move]', el).forEach(b => b.onclick = async () => {
+    try { await post(`/api/runs/${b.dataset.runId}/move`, { to: b.dataset.move }); route(); } catch (e) { qmsg(e.message, true); }
+  });
+  $$('[data-edit]', el).forEach(b => b.onclick = async () => {
+    const id = b.dataset.edit;
+    try {
+      const r = await api(`/api/runs/${id}/artifact?path=TASK.md`);
+      $('#qedit').hidden = false; $('#qedit-id').textContent = id; $('#qedit-md').value = r.text; $('#qedit-err').textContent = '';
+      $('#qedit-save').onclick = async () => {
+        try { await api(`/api/runs/${id}/task`, { method: 'PUT', body: JSON.stringify({ markdown: $('#qedit-md').value }) }); route(); }
+        catch (e) { $('#qedit-err').textContent = e.message; }
+      };
+      $('#qedit-close').onclick = () => { $('#qedit').hidden = true; };
+    } catch (e) { qmsg(e.message, true); }
+  });
   bindRunRows();
   $$('[data-cancel]', el).forEach(b => b.onclick = async () => {
     if (!confirm(`Cancel ${b.dataset.cancel}? It will be marked ABORTED.`)) return;
@@ -531,7 +552,8 @@ setInterval(() => {
   $('#clock').textContent = new Date().toLocaleTimeString();
   refreshRail().catch(() => {});
   const typing = document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName);
-  if (!typing && /^#\/(all|p\/[^/]+\/[^/]+\/(runs|queue))$/.test(location.hash) && routeKey === location.hash) route();
+  const editing = $('#qedit') && !$('#qedit').hidden;
+  if (!typing && !editing &&/^#\/(all|p\/[^/]+\/[^/]+\/(runs|queue))$/.test(location.hash) && routeKey === location.hash) route();
 }, 5000);
 
 route();

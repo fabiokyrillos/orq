@@ -51,6 +51,7 @@ class RunRecord:
     reviewer_session: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    queue_order: float = 0.0  # Phase 6: position in the queue (lower runs first); set when the run is created
 
 
 @dataclass
