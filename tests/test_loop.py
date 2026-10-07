@@ -1200,3 +1200,31 @@ def test_owner_updates_are_kept_for_the_digest(env) -> None:
     updates = [e for e in gate_events(paths, runner.run_id) if e["type"] == "owner_update"]
     assert updates[0]["text"] == "Greeting file added; next the tests." and updates[0]["iteration"] == 1 and updates[0]["milestone"] == 1
     assert runner.cp.updates["1"] == "Greeting file added; next the tests."
+
+
+# fewer wasted iterations (Phase 6)
+
+def test_task_complete_skips_the_remaining_milestones(env) -> None:
+    make, paths, _ = env
+    whole = review("done", None)
+    whole.structured["task_complete"] = True
+    implementer = FakeImplementer([ok()])
+    runner = make(implementer, FakeReviewer([whole]),
+                  planner=FakePlanner([plan(("Add greeting", "mechanical"), ("Add tests", "mechanical"), ("Docs", "mechanical"))]))
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert implementer.calls == 1
+    skipped = [e for e in gate_events(paths, runner.run_id) if e["type"] == "milestones_skipped"]
+    assert skipped and skipped[0]["titles"] == ["Add tests", "Docs"]
+
+
+def test_task_complete_with_a_major_issue_does_not_skip(env) -> None:
+    make, paths, _ = env
+    whole = review("done", None)
+    whole.structured.update(task_complete=True, issues=[{"severity": "major", "description": "no tests"}])
+    implementer = FakeImplementer([ok(), ok(), ok()])
+    runner = make(implementer, FakeReviewer([whole, review("done", None), review("done", None)]),
+                  planner=FakePlanner([plan(("Add greeting", "mechanical"), ("Add tests", "mechanical"))]))
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert implementer.calls == 3 and not [e for e in gate_events(paths, runner.run_id) if e["type"] == "milestones_skipped"]

@@ -50,8 +50,10 @@ REVIEW_SCHEMA = {
         "human": _HUMAN,
         # Phase 6: plain-language progress for the owner's digests (what this iteration achieved, what comes next).
         "owner_update": {"type": "string"},
+        # Phase 6: the whole task is done already; the remaining milestones are skipped.
+        "task_complete": {"type": "boolean"},
     },
-    "required": ["status", "summary", "milestone", "next_prompt", "issues", "human", "owner_update"],
+    "required": ["status", "summary", "milestone", "next_prompt", "issues", "human", "owner_update", "task_complete"],
     "additionalProperties": False,
 }
 # Fields the CLI is asked for but older answers (and the test fakes) may lack; the runner treats them as empty.

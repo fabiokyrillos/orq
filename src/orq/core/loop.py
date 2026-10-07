@@ -515,6 +515,11 @@ class Runner:
         else:
             next_prompt, done = review.get("next_prompt"), status == "done"
         milestones = (self.cp.plan or {}).get("milestones") or []
+        if done and review.get("task_complete") is True and self.cp.milestone_index < len(milestones) - 1:
+            # The reviewer says the whole task already holds: skip the remaining milestones (Phase 6).
+            skipped = milestones[self.cp.milestone_index + 1:]
+            self.rundir.event("milestones_skipped", iteration=it, titles=[m["title"] for m in skipped])
+            self.cp.milestone_index = len(milestones) - 1
         if done and self.cp.milestone_index < len(milestones) - 1:
             # This milestone is done; the task is not. Move on without entering the gate.
             self.rundir.event("milestone_done", iteration=it, milestone=self.cp.milestone_index + 1, of=len(milestones))
