@@ -421,12 +421,15 @@ async def sse_lines(path: Path, request: Request, *, follow: bool, condense) -> 
     position = 0
     while True:
         if path.exists():
-            with path.open("r", encoding="utf-8", errors="replace") as handle:
+            # Bytes, not text: run logs are written in text mode, so on Windows lines end with CRLF and a text-mode
+            # offset would drift by one byte per line and land inside an earlier line on the next round.
+            with path.open("rb") as handle:
                 handle.seek(position)
-                for line in handle:
-                    if not line.endswith("\n"):
+                for raw in handle:
+                    if not raw.endswith(b"\n"):
                         break  # partial write; read it next round
-                    position += len(line.encode("utf-8"))
+                    position += len(raw)
+                    line = raw.decode("utf-8", errors="replace").rstrip("\r\n") + "\n"
                     text = condense(line) if condense else line.rstrip("\n")
                     if text:
                         payload = "\n".join(f"data: {part}" for part in text.splitlines())

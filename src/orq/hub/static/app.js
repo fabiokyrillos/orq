@@ -232,7 +232,8 @@ function settingsTab(el, p) {
     try {
       await api(`/api/projects/${p.repo}`, { method: 'PATCH', body: JSON.stringify({ name: $('#s-name').value, base_branch: $('#s-base').value,
         check_command: $('#s-check').value, max_concurrent: max ? Number(max) : null }) });
-      $('#s-msg').textContent = 'saved'; $('#s-msg').className = 'msg'; refreshRail();
+      await route();  // the header shows the new name and cap
+      $('#s-msg').textContent = 'saved'; $('#s-msg').className = 'msg';
     } catch (e) { $('#s-msg').textContent = e.message; $('#s-msg').className = 'msg err'; }
   };
 }

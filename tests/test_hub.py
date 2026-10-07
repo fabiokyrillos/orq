@@ -386,3 +386,33 @@ def test_finished_runs_show_no_pending_decisions(home: OrqPaths) -> None:
     c = client(home)
     assert c.get("/api/runs").json()[0]["pending"] == 0
     assert c.get("/api/runs/RAAAAA").json()["decisions"] == []
+
+
+def test_sse_follow_handles_crlf_files_without_repeating_lines(tmp_path: Path) -> None:
+    """Run logs are written in text mode, so on Windows they end lines with CRLF; offsets must count those bytes."""
+    import asyncio
+
+    from orq.hub.app import sse_lines
+
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(b'{"n": 1}\r\n{"n": 2}\r\n{"n": 2.5}\r\n')  # 3 CRLFs: a text-mode offset lands inside a line
+
+    class Request:
+        rounds = 0
+
+        async def is_disconnected(self) -> bool:
+            Request.rounds += 1
+            if Request.rounds == 1:
+                with path.open("ab") as fh:
+                    fh.write(b'{"n": 3}\r\n{"n": 4')  # the last line is still being written
+            if Request.rounds == 2:
+                with path.open("ab") as fh:
+                    fh.write(b'}\r\n')
+            return Request.rounds > 2
+
+    async def collect() -> list[str]:
+        return [chunk async for chunk in sse_lines(path, Request(), follow=True, condense=None)]
+
+    chunks = asyncio.run(collect())
+
+    assert chunks == ['data: {"n": 1}\n\n', 'data: {"n": 2}\n\n', 'data: {"n": 2.5}\n\n', 'data: {"n": 3}\n\n', 'data: {"n": 4}\n\n']
