@@ -23,11 +23,13 @@ from orq.config import Config
 from orq.core.answers import record_answer
 from orq.core.checkpoint import Checkpoint
 from orq.core.hygiene import drop_orchestrator_milestones, review_complains_about_sandbox, strip_sandbox_complaints
-from orq.core.models import Decision, RunRecord, RunState, new_decision_id, new_run_id
+from orq.core.models import Decision, RunState, new_decision_id
 from orq.core.procs import kill_tree, pid_alive
 from orq.core.progress import ProgressTracker
 from orq.core.prompts import (IMPLEMENTER_RULES, build_implementer_prompt, build_planner_prompt, build_reviewer_prompt,
                               guard_outcome_lines, plan_markdown)
+from orq.core.queue import QueueError, check_sandbox, create_run
+from orq.core.summary import write_summary
 from orq.core.ratelimit import claude_reset_time
 from orq.core.task import Task, parse_task
 from orq.git.manager import GitManager
@@ -54,8 +56,7 @@ _PHASE_STATE = {"plan": RunState.PLANNING, "implement": RunState.IMPLEMENTING, "
                 "gate_review": RunState.FINALIZING, "gate_merge": RunState.FINALIZING}
 
 
-class SandboxError(RuntimeError):
-    pass
+SandboxError = QueueError  # the repo is outside [git].sandbox_repos
 
 
 class ResumeError(RuntimeError):
@@ -79,8 +80,7 @@ class Runner:
                  clone_url: str | None = None, printer: Printer = print, run_id: str | None = None,
                  checkpoint: Checkpoint | None = None, planner: Agent | None = None, ci: CiWatcher | None = None,
                  wait_for_answers: bool = False, notifier: Notifier | None = None) -> None:
-        if config.git.sandbox_repos and task.repo not in config.git.sandbox_repos:
-            raise SandboxError(f"{task.repo} is not listed in [git].sandbox_repos (empty list allows any repo)")
+        check_sandbox(config, task)
         self.config, self.paths, self.store, self.task = config, paths, store, task
         self.git, self.implementer, self.reviewer, self.scanner = git, implementer, reviewer, scanner
         self.planner = planner or reviewer  # SPEC 4: the planner is the reviewer agent at high effort
@@ -91,17 +91,11 @@ class Runner:
         self.wait_for_answers = wait_for_answers
         self.notifier = notifier  # local desktop toast (SPEC 9.4); WhatsApp belongs to the hub
         self._resumed_at = time.monotonic()
+        self._has_slot = False
         if checkpoint is None:
-            self.run_id = run_id or new_run_id()
-            branch = f"orq/{task.slug}"
-            worktree = config.git.worktree_root / task.repo.split("/")[-1] / self.run_id
+            self.cp = create_run(config, paths, store, task, task_text, clone_url=clone_url, run_id=run_id)
+            self.run_id = self.cp.run_id
             self.rundir = RunDir(paths.run_dir(self.run_id))
-            self.rundir.create(task_text)
-            self.cp = Checkpoint(run_id=self.run_id, state=RunState.QUEUED.value, phase="setup", branch=branch,
-                                 worktree=str(worktree), clone_url=clone_url,
-                                 started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
-            self.store.create_run(RunRecord(run_id=self.run_id, repo=task.repo, task_title=task.title, branch=branch,
-                                            worktree=str(worktree)))
         else:
             self.run_id, self.cp = checkpoint.run_id, checkpoint
             self.rundir = RunDir(paths.run_dir(self.run_id))
@@ -190,10 +184,20 @@ class Runner:
 
     async def execute(self) -> RunState:
         try:
+            return await self._execute()
+        finally:
+            self._release_slot()
+            if self.cp.state in (RunState.DONE.value, RunState.FAILED.value, RunState.ABORTED.value):
+                write_summary(self.rundir.path)
+
+    async def _execute(self) -> RunState:
+        try:
             while True:
                 if (self.rundir.path / PAUSE_FLAG).exists():
                     raise _Stop(RunState.PAUSED, "pause requested by the owner")
                 self._check_wall_time()
+                if self.cp.phase not in ("await", "done"):
+                    await self._acquire_slot()
                 await self._wait_rate_limit_if_needed()
                 phase = self.cp.phase
                 if phase == "setup":
@@ -225,7 +229,7 @@ class Runner:
                 else:
                     raise _Stop(RunState.FAILED, f"unknown phase {phase}")
         except _Yield:
-            return await self.execute()
+            return await self._execute()
         except _Stop as stop:
             if stop.state is RunState.AWAITING_HUMAN:  # already recorded when the decision was raised
                 return RunState(self.cp.state)
@@ -233,6 +237,39 @@ class Runner:
             if stop.state in (RunState.FAILED, RunState.ABORTED):
                 self._notify(f"orq {self.run_id} {stop.state.value}", f"{self.task.title}: {stop.reason}")
             return stop.state
+
+    async def _acquire_slot(self) -> None:
+        """Take a concurrency slot (SPEC 10.1) before agent work; wait in QUEUED while none is free."""
+        if self._has_slot:
+            return
+
+        def attempt() -> bool:
+            return self.store.try_acquire_slot(self.run_id, self.task.repo, os.getpid(), fresh=self.cp.phase == "setup",
+                                               global_limit=self.config.limits.max_concurrent_runs,
+                                               default_project_limit=self.config.queue.project_concurrency)
+
+        if not attempt():
+            held = self.store.held_slots()
+            self.rundir.event("waiting_for_slot", held=held, limit=self.config.limits.max_concurrent_runs, phase=self.cp.phase)
+            if self.cp.state != RunState.QUEUED.value:
+                self._transition(RunState.QUEUED, waiting="slot")
+            self._save()
+            self.print(f"[{self.run_id}] waiting for a free slot ({held}/{self.config.limits.max_concurrent_runs} in use)")
+            while True:
+                if (self.rundir.path / PAUSE_FLAG).exists():
+                    raise _Stop(RunState.PAUSED, "pause requested by the owner while waiting for a slot")
+                await asyncio.sleep(self.config.queue.poll_seconds)
+                if attempt():
+                    break
+            self._resumed_at = time.monotonic()  # time in the queue does not count toward max_wall_hours
+        self._has_slot = True
+        self.rundir.event("slot_acquired", phase=self.cp.phase)
+
+    def _release_slot(self) -> None:
+        self.store.release_slot(self.run_id)
+        if self._has_slot:
+            self._has_slot = False
+            self.rundir.event("slot_released", phase=self.cp.phase)
 
     def _notify(self, title: str, message: str) -> None:
         if self.notifier is None:
@@ -696,6 +733,7 @@ class Runner:
         self.cp.pending_decision = {"decision_id": decision.decision_id, "kind": kind, "payload": payload}
         self.cp.phase = "await"
         self._transition(state, decision_id=decision.decision_id)
+        self._release_slot()  # waiting for the owner costs no subscription time; another run may work meanwhile
         self._notify(f"orq {self.run_id} needs you ({decision.decision_id})", decision.question)
 
     async def _await(self) -> None:
@@ -712,11 +750,13 @@ class Runner:
             decision = record_answer(self.store, self.paths, decision.decision_id, self.human(decision), via="terminal")
         elif self.wait_for_answers:
             self._print_decision(decision)
+            self._save()
             while decision.status != "answered":
                 if (self.rundir.path / PAUSE_FLAG).exists():
                     raise _Stop(RunState.PAUSED, "pause requested by the owner while waiting for an answer")
                 await asyncio.sleep(self.config.notify.answer_poll_seconds)
                 decision = self.store.get_decision(decision.decision_id) or decision
+            self._resumed_at = time.monotonic()  # the owner's time does not count toward max_wall_hours
             self.rundir.event("answer_applied", decision_id=decision.decision_id, answer=decision.answer, via=decision.answered_via)
             self.print(f"[{self.run_id}] {decision.decision_id} answered via {decision.answered_via}: {decision.answer}")
         else:

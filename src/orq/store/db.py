@@ -214,9 +214,13 @@ class Store:
         self._conn.execute("DELETE FROM slots WHERE run_id = ?", (run_id,))
         self._conn.commit()
 
-    def slot_usage(self) -> list[dict]:
-        """Every slot row (held or waiting), oldest first."""
-        return [dict(r) for r in self._conn.execute("SELECT * FROM slots ORDER BY since").fetchall()]
+    def slot_usage(self, alive: Callable[[int], bool] | None = None) -> list[dict]:
+        """Every slot row (held or waiting), oldest first; with `alive`, only rows of live processes."""
+        rows = [dict(r) for r in self._conn.execute("SELECT * FROM slots ORDER BY since").fetchall()]
+        return [r for r in rows if alive(r["pid"])] if alive else rows
+
+    def held_slots(self) -> int:
+        return sum(1 for row in self.slot_usage(alive=pid_alive) if row["held"])
 
     # decisions
 

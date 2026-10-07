@@ -22,6 +22,7 @@ from orq.core.answers import AnswerError, record_answer
 from orq.core.checkpoint import Checkpoint
 from orq.core.control import ControlError, abort_run, request_pause, spawn_resume
 from orq.core.models import Decision, RunRecord
+from orq.hub.dispatcher import Dispatcher
 from orq.hub.whatsapp_tasks import WhatsAppTasks
 from orq.notify.whatsapp import WhatsAppClient
 from orq.paths import OrqPaths
@@ -38,12 +39,15 @@ class AnswerBody(BaseModel):
 def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | None = None, start_tasks: bool = True) -> FastAPI:
     store = Store(paths.db)
     tasks = WhatsAppTasks(store, paths, config, whatsapp) if whatsapp is not None else None
+    dispatcher = Dispatcher(store, paths, config)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         handles = []
+        if start_tasks:
+            handles.append(asyncio.create_task(dispatcher.loop()))
         if tasks is not None and start_tasks:
-            handles = [asyncio.create_task(tasks.outbound_loop()), asyncio.create_task(tasks.inbound_loop())]
+            handles += [asyncio.create_task(tasks.outbound_loop()), asyncio.create_task(tasks.inbound_loop())]
         try:
             yield
         finally:

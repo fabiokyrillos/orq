@@ -82,13 +82,23 @@ def format_run_state(run: RunRecord, *, pr_url: str | None = None, reason: str |
     return "\n".join(lines)
 
 
-def format_status(runs: list[RunRecord], pending: dict[str, list[Decision]]) -> str:
+def format_status(runs: list[RunRecord], pending: dict[str, list[Decision]], *, slots: tuple[int, int] | None = None,
+                  queued: int = 0) -> str:
+    """Up to 10 runs (newest first), grouped by project; slots used/limit and the queue length in the header."""
+    header = "*[orq] STATUS*"
+    if slots is not None:
+        header += f" · slots {slots[0]}/{slots[1]} · {queued} queued"
     if not runs:
-        return "*[orq] STATUS*\nno runs"
-    lines = ["*[orq] STATUS*"]
+        return header + "\nno runs"
+    groups: dict[str, list[RunRecord]] = {}
     for run in runs[:10]:
-        line = f"{run.run_id} {run.state.value} iter {run.iteration} · {run.repo.split('/')[-1]} · {run.task_title}"
-        for decision in pending.get(run.run_id, []):
-            line += f"\n  pending {decision.decision_id}: {decision.question.strip()[:80]}"
-        lines.append(line)
+        groups.setdefault(run.repo, []).append(run)
+    lines = [header]
+    for repo, members in groups.items():
+        lines.append(f"*{repo.split('/')[-1]}*")
+        for run in members:
+            line = f"{run.run_id} {run.state.value} iter {run.iteration} · {run.task_title}"
+            for decision in pending.get(run.run_id, []):
+                line += f"\n  pending {decision.decision_id}: {decision.question.strip()[:80]}"
+            lines.append(line)
     return "\n".join(lines)

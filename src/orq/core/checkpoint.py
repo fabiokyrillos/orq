@@ -53,8 +53,9 @@ class Checkpoint:
     started_at: str | None = None
     elapsed_seconds: float = 0.0
 
-    def save(self, path: Path) -> None:
-        self.pid = os.getpid()
+    def save(self, path: Path, *, pid: int | None = None) -> None:
+        """Stamp the saving process's pid (resume refuses live runs); a queued run has none yet (pid=0)."""
+        self.pid = os.getpid() if pid is None else pid
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(path)

@@ -109,8 +109,12 @@ class WhatsAppTasks:
         reply = parse_reply(text)
         try:
             if reply.kind == "status":
-                runs = [r for r in self.store.list_runs() if reply.run_id is None or r.run_id == reply.run_id]
-                return format_status(runs, {r.run_id: self.store.pending_decisions(r.run_id) for r in runs})
+                every = self.store.list_runs()
+                runs = [r for r in every if reply.run_id is None or r.run_id == reply.run_id]
+                held = self.store.held_slots()
+                queued = sum(1 for r in every if r.state is RunState.QUEUED)
+                return format_status(runs, {r.run_id: self.store.pending_decisions(r.run_id) for r in runs},
+                                     slots=(held, self.config.limits.max_concurrent_runs), queued=queued)
             if reply.kind == "pause":
                 live = request_pause(self.paths, reply.run_id or "")
                 return f"{reply.run_id}: pause requested" + ("" if live else " (no live process; it stays paused until RESUME)")

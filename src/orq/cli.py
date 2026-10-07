@@ -145,6 +145,24 @@ def run(
 
 
 @app.command()
+def queue(
+    task_file: Path = typer.Argument(..., exists=True, readable=True, help="Path to TASK.md"),
+    clone_url: str | None = typer.Option(None, "--clone-url", hidden=True, help="Override the clone URL (tests)."),
+) -> None:
+    """Queue a task. The hub (`orq dashboard`) starts it when a slot is free; `orq resume <run_id>` starts it by hand."""
+    from orq.core.queue import QueueError, enqueue
+
+    paths = OrqPaths.from_env()
+    try:
+        run_id = enqueue(paths, Store(paths.db), load_config(paths.config), task_file.read_text(encoding="utf-8"), clone_url=clone_url)
+    except (TaskError, QueueError) as exc:
+        typer.secho(f"not queued: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    typer.echo(f"queued {run_id}")
+    typer.echo(f"`orq dashboard` starts it when a slot is free, or run `orq resume {run_id}` now.")
+
+
+@app.command()
 def resume(
     run_id: str,
     no_prompt: bool = typer.Option(False, "--no-prompt", help="Exit at the next decision instead of waiting for an answer."),
@@ -285,6 +303,9 @@ def status(run_id: str | None = typer.Argument(None)) -> None:
         if not runs:
             typer.echo("no runs")
             return
+        limit = load_config(paths.config).limits.max_concurrent_runs
+        queued = sum(1 for r in runs if r.state is RunState.QUEUED)
+        typer.echo(f"slots {store.held_slots()}/{limit} in use, {queued} queued")
         for item in runs:
             typer.echo(f"{item.run_id}  {item.state.value:<22} iter {item.iteration:<3} {item.repo}  {item.task_title}")
         return

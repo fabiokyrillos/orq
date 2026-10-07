@@ -10,6 +10,7 @@ from pathlib import Path
 from orq.core.checkpoint import Checkpoint
 from orq.core.models import RunState
 from orq.core.procs import pid_alive
+from orq.core.summary import write_summary
 from orq.git.manager import GitError, GitManager
 from orq.paths import OrqPaths
 from orq.store.db import Store
@@ -57,6 +58,7 @@ def abort_run(paths: OrqPaths, run_id: str, *, git: GitManager | None = None) ->
     cp.save(rundir.path / "state.json")
     Store(paths.db).set_state(run_id, RunState.ABORTED)
     rundir.event("state", state=RunState.ABORTED.value, reason="aborted by owner")
+    write_summary(rundir.path)
     return warning
 
 

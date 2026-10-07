@@ -181,6 +181,7 @@ def test_abort_marks_inactive_run(home: OrqPaths) -> None:
     assert Store(home.db).get_run("RAAAAA").state is RunState.ABORTED
     from orq.core.checkpoint import Checkpoint
     assert Checkpoint.load(home.run_dir("RAAAAA") / "state.json").phase == "done"
+    assert json.loads((home.run_dir("RAAAAA") / "summary.json").read_text(encoding="utf-8"))["state"] == "ABORTED"
 
 
 def test_abort_refuses_live_run(home: OrqPaths) -> None:
@@ -386,3 +387,34 @@ def test_project_add_rejects_unknown_repo(home: OrqPaths, tmp_path: Path, monkey
 
     assert result.exit_code == 1
     assert "Could not resolve" in result.output
+
+
+def test_queue_then_resume_runs_to_done(home: OrqPaths, origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home.config.write_text(
+        f'[git]\nworktree_root = "{(tmp_path / "wt").as_posix()}"\n[merge]\npoll_seconds = 0.05\n', encoding="utf-8"
+    )
+    task = tmp_path / "TASK.md"
+    task.write_text(TASK, encoding="utf-8")
+    py = sys.executable
+    monkeypatch.setenv("ORQ_CLAUDE_EXE", f"{py} {FAKES / 'fake_claude.py'}")
+    monkeypatch.setenv("ORQ_CODEX_CMD", f"{py} {FAKES / 'fake_codex.py'}")
+    monkeypatch.setenv("ORQ_GH_CMD", f"{py} {FAKES / 'fake_gh.py'}")
+    monkeypatch.setenv("FAKE_RECORD", str(tmp_path / "rec.json"))
+    monkeypatch.setenv("FAKE_GH_RECORD", str(tmp_path / "gh.jsonl"))
+    monkeypatch.setenv("FAKE_SCENARIO", "ok")
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "done")
+
+    queued = CliRunner().invoke(app, ["queue", str(task), "--clone-url", str(origin)])
+
+    assert queued.exit_code == 0, queued.output
+    run_id = queued.output.split()[1]
+    assert Store(home.db).get_run(run_id).state is RunState.QUEUED
+    assert "orq dashboard" in queued.output
+    status = CliRunner().invoke(app, ["status"])
+    assert "slots 0/2" in status.output and "1 queued" in status.output
+
+    resumed = CliRunner().invoke(app, ["resume", run_id, "--no-prompt"])
+
+    assert resumed.exit_code == 0, resumed.output
+    assert Store(home.db).get_run(run_id).state is RunState.DONE
+    assert Store(home.db).slot_usage() == []

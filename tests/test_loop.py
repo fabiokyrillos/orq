@@ -722,7 +722,7 @@ def test_gate_happy_path_merges_and_removes_worktree(env) -> None:
     assert final is RunState.DONE
     assert ["pr", "merge", "7", "--squash", "--delete-branch"] in pr_calls
     assert not runner.worktree.exists()
-    types = [e["type"] for e in gate_events(paths, runner.run_id)]
+    types = [e["type"] for e in gate_events(paths, runner.run_id) if not e["type"].startswith("slot_")]
     assert types[-3:] == ["pr_merged", "worktree_removed", "state"] and "ci" in types and "final_review" in types
     assert "Final review before merge" in reviewer.prompts[1] and "checks passed" in reviewer.prompts[1]
     assert runner.cp.pr_number == 7 and runner.cp.pr_url.endswith("/pull/1")
@@ -991,3 +991,96 @@ def test_notifier_failure_is_logged_not_raised(env) -> None:
     runner.notifier = broken
     assert asyncio.run(runner.execute()) is RunState.ABORTED
     assert any(e["type"] == "toast_failed" for e in gate_events(paths, runner.run_id))
+
+
+# slots (Phase 5)
+
+def hold_slot(store: Store, run_id: str, repo: str = "owner/other") -> None:
+    import os
+    assert store.try_acquire_slot(run_id, repo, os.getpid(), fresh=False, global_limit=1, default_project_limit=1)
+
+
+def test_runner_waits_queued_for_a_slot_then_runs(env, monkeypatch) -> None:
+    make, paths, _ = env
+    runner = make(FakeImplementer([ok()]), FakeReviewer([review("done", None)]))
+    runner.config.limits.max_concurrent_runs = 1
+    hold_slot(runner.store, "ROTHER")
+    polls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        polls.append(seconds)
+        if len(polls) == 2:
+            runner.store.release_slot("ROTHER")  # the other run finished
+
+    monkeypatch.setattr("orq.core.loop.asyncio.sleep", fake_sleep)
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert polls == [5, 5]
+    events = gate_events(paths, runner.run_id)
+    waiting = [e for e in events if e["type"] == "waiting_for_slot"]
+    assert len(waiting) == 1 and waiting[0]["held"] == 1 and waiting[0]["limit"] == 1
+    assert states(paths, runner.run_id)[:2] == ["QUEUED", "PLANNING"]  # a fresh run is QUEUED already; no second state event
+    assert runner.store.slot_usage() == []
+
+
+def test_pause_while_waiting_for_a_slot(env, monkeypatch) -> None:
+    make, paths, _ = env
+    runner = make(FakeImplementer([]), FakeReviewer([]))
+    runner.config.limits.max_concurrent_runs = 1
+    hold_slot(runner.store, "ROTHER")
+
+    async def fake_sleep(seconds: float) -> None:
+        (runner.rundir.path / "pause.requested").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("orq.core.loop.asyncio.sleep", fake_sleep)
+
+    assert asyncio.run(runner.execute()) is RunState.PAUSED
+    assert [s["run_id"] for s in runner.store.slot_usage()] == ["ROTHER"]
+
+
+def test_slot_is_released_while_waiting_for_the_owner_and_taken_again(env, monkeypatch) -> None:
+    from orq.core.answers import record_answer
+    make, paths, _ = env
+    runner = make(FakeImplementer([denied("git reset --hard"), ok()]), FakeReviewer([review("continue", "go"), review("done", None)]),
+                  human=None, wait=True)
+    seen: list[list[dict]] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        seen.append(runner.store.slot_usage())
+        pending = runner.store.pending_decisions(runner.run_id)
+        if pending:
+            record_answer(Store(paths.db), paths, pending[0].decision_id, "approve", via="dashboard")
+
+    monkeypatch.setattr("orq.core.loop.asyncio.sleep", fake_sleep)
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert seen and seen[0] == []  # nothing held while the decision was pending
+    acquired = [e for e in gate_events(paths, runner.run_id) if e["type"] == "slot_acquired"]
+    assert len(acquired) == 2
+    assert runner.store.slot_usage() == []
+
+
+def test_headless_exit_at_a_decision_releases_the_slot(env) -> None:
+    make, paths, _ = env
+    runner = make(FakeImplementer([denied("git reset --hard")]), FakeReviewer([review("continue", "go")]), human=None)
+
+    assert asyncio.run(runner.execute()) is RunState.AWAITING_HUMAN
+    assert runner.store.slot_usage() == []
+
+
+def test_finished_run_writes_its_summary(env) -> None:
+    make, paths, _ = env
+    runner = make(FakeImplementer([ok()]), FakeReviewer([review("done", None)]))
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+
+    summary = json.loads((runner.rundir.path / "summary.json").read_text(encoding="utf-8"))
+    assert summary["state"] == "DONE" and summary["pr"]["merged"] is True
+
+
+def test_run_parked_at_a_decision_writes_no_summary(env) -> None:
+    make, paths, _ = env
+    runner = make(FakeImplementer([denied("git reset --hard")]), FakeReviewer([review("continue", "go")]), human=None)
+
+    assert asyncio.run(runner.execute()) is RunState.AWAITING_HUMAN
+    assert not (runner.rundir.path / "summary.json").exists()

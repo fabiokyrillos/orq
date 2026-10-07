@@ -69,3 +69,15 @@ def test_parse_unknown_shapes() -> None:
     assert parse_reply("D7K2").kind == "unknown" and parse_reply("D7K2").decision_id == "D7K2"
     assert parse_reply("APPROVE").kind == "unknown"
     assert "D7K2 1" in HINT and "APPROVE D7K2" in DESTRUCTIVE_HINT.format(id="D7K2")
+
+
+def test_status_groups_by_project_and_shows_slots() -> None:
+    runs = [run(run_id="RA1", repo="owner/a", state=RunState.IMPLEMENTING), run(run_id="RB1", repo="owner/b", state=RunState.QUEUED),
+            run(run_id="RA2", repo="owner/a", state=RunState.DONE)]
+
+    status = format_status(runs, {}, slots=(1, 2), queued=1)
+
+    lines = status.splitlines()
+    assert lines[0] == "*[orq] STATUS* · slots 1/2 · 1 queued"
+    assert lines[1] == "*a*" and lines[2].startswith("RA1 IMPLEMENTING") and lines[3].startswith("RA2 DONE")
+    assert lines[4] == "*b*" and lines[5].startswith("RB1 QUEUED")
