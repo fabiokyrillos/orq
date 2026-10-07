@@ -121,3 +121,45 @@ def test_dispatcher_ignores_runs_that_are_not_queued(home: OrqPaths) -> None:
     store.set_state(run_id, RunState.ABORTED)
 
     assert Dispatcher(store, home, config(), spawn=Spawner()).tick() == []
+
+
+# auto-resume (Phase 6)
+
+def parked(home: OrqPaths, store: Store, repo: str, *, answered: bool, state: RunState = RunState.AWAITING_HUMAN) -> str:
+    from orq.core.answers import record_answer
+    from orq.core.models import Decision
+    run_id = enqueue(home, store, config(), TASK.format(repo=repo))
+    decision = Decision(decision_id="D" + run_id[1:5], run_id=run_id, source="reviewer", decision_type="business", question="q?",
+                        options=["a", "b"])
+    store.add_decision(decision)
+    cp = Checkpoint.load(home.run_dir(run_id) / "state.json")
+    cp.phase, cp.state = "await", state.value
+    cp.pending_decision = {"decision_id": decision.decision_id, "kind": "reviewer", "payload": {}}
+    cp.save(home.run_dir(run_id) / "state.json", pid=0)   # its process exited at the decision (--no-prompt, crash, reboot)
+    store.set_state(run_id, state)
+    if answered:
+        record_answer(store, home, decision.decision_id, "0", via="whatsapp")
+    return run_id
+
+
+def test_dispatcher_resumes_answered_runs_without_a_process(home: OrqPaths) -> None:
+    store = Store(home.db)
+    answered = parked(home, store, "owner/a", answered=True)
+    waiting = parked(home, store, "owner/b", answered=False)
+    plan = parked(home, store, "owner/c", answered=True, state=RunState.AWAITING_PLAN_APPROVAL)
+    paused = enqueue(home, store, config(), TASK.format(repo="owner/d"))
+    store.set_state(paused, RunState.PAUSED)
+    spawn = Spawner()
+
+    picked = Dispatcher(store, home, config(global_limit=3), spawn=spawn).tick()
+
+    assert sorted(picked) == sorted([answered, plan]) and waiting not in spawn.spawned and paused not in spawn.spawned
+
+
+def test_answered_runs_go_before_fresh_queued_ones(home: OrqPaths) -> None:
+    store = Store(home.db)
+    fresh = enqueue(home, store, config(), TASK.format(repo="owner/a"))
+    answered = parked(home, store, "owner/b", answered=True)
+
+    assert Dispatcher(store, home, config(global_limit=1), spawn=Spawner()).tick() == [answered]
+    assert fresh

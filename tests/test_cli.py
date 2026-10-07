@@ -426,3 +426,39 @@ def test_abort_expires_pending_decisions(home: OrqPaths) -> None:
 
     assert CliRunner().invoke(app, ["abort", "RAAAAA"]).exit_code == 0
     assert Store(home.db).get_decision("DCCCC").status == "expired"
+
+
+# hub autostart (Phase 6)
+
+def test_autostart_argv_builder(tmp_path: Path) -> None:
+    from orq.cli import autostart_argv
+    py = tmp_path / "pythonw.exe"
+
+    on = autostart_argv("on", python=py, log_file=tmp_path / "hub.log")
+    assert on[:2] == ["schtasks", "/Create"] and "ONLOGON" in on and on[on.index("/TN") + 1] == "orq-hub"
+    assert on[on.index("/TR") + 1] == f'"{py}" -m orq dashboard --log-file "{tmp_path / "hub.log"}"'
+    assert autostart_argv("off", python=py, log_file=tmp_path / "x")[:2] == ["schtasks", "/Delete"]
+    assert autostart_argv("status", python=py, log_file=tmp_path / "x")[:2] == ["schtasks", "/Query"]
+    with pytest.raises(ValueError):
+        autostart_argv("maybe", python=py, log_file=tmp_path / "x")
+
+
+def test_hub_autostart_runs_schtasks_and_reports(home: OrqPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+    calls: list = []
+    monkeypatch.setattr("orq.cli.subprocess.run", lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "SUCCESS", ""))
+
+    result = CliRunner().invoke(app, ["hub", "autostart", "on"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0][:2] == ["schtasks", "/Create"] and "hub.log" in calls[0][calls[0].index("/TR") + 1]
+    assert "orq-hub" in result.output
+
+
+def test_hub_autostart_failure_explains(home: OrqPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+    monkeypatch.setattr("orq.cli.subprocess.run", lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "ERROR: Access is denied."))
+
+    result = CliRunner().invoke(app, ["hub", "autostart", "on"])
+
+    assert result.exit_code == 1 and "Access is denied" in result.output and "administrator" in result.output

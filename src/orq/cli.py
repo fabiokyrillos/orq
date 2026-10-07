@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -198,7 +199,7 @@ def answer(
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1)
     cp = Checkpoint.try_load(paths.run_dir(decision.run_id) / "state.json")
-    hint = "" if cp and pid_alive(cp.pid) else f" Run `orq resume {decision.run_id}` to continue."
+    hint = "" if cp and pid_alive(cp.pid) else f" The hub resumes it; without the hub, run `orq resume {decision.run_id}`."
     typer.echo(f"{decision_id} answered: {decision.answer}.{hint}")
 
 
@@ -228,9 +229,21 @@ def abort(run_id: str) -> None:
 
 
 @app.command()
-def dashboard(port: int | None = typer.Option(None, "--port", help="Override [dashboard].port.")) -> None:
+def dashboard(
+    port: int | None = typer.Option(None, "--port", help="Override [dashboard].port."),
+    log_file: Path | None = typer.Option(None, "--log-file", help="Write all output here (used when started at logon with pythonw)."),
+) -> None:
     """Serve the local dashboard on 127.0.0.1 and own the WhatsApp channel while running."""
+    import logging
+
     import uvicorn
+
+    if log_file is not None:
+        # pythonw has no console (sys.stdout is None); everything, uvicorn's logs included, goes to the file.
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        stream = log_file.open("a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stderr = stream
+        logging.basicConfig(stream=stream, level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     from orq.hub.app import create_app
     from orq.notify.whatsapp import WhatsAppClient
@@ -243,6 +256,44 @@ def dashboard(port: int | None = typer.Option(None, "--port", help="Override [da
     config.dashboard.port = chosen  # the hub only answers requests addressed to this port (Host check)
     typer.echo(f"dashboard: http://127.0.0.1:{chosen}/")
     uvicorn.run(create_app(paths, config, whatsapp=whatsapp), host="127.0.0.1", port=chosen, log_level="warning")
+
+
+AUTOSTART_TASK = "orq-hub"
+hub_app = typer.Typer(no_args_is_help=True, help="The hub (orq dashboard) as a background service.")
+app.add_typer(hub_app, name="hub")
+
+
+def autostart_argv(action: str, *, python: Path, log_file: Path) -> list[str]:
+    """schtasks command lines for the logon task that starts the hub without a console (Phase 6)."""
+    if action == "on":
+        command = f'"{python}" -m orq dashboard --log-file "{log_file}"'
+        return ["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/RL", "LIMITED", "/TN", AUTOSTART_TASK, "/TR", command]
+    if action == "off":
+        return ["schtasks", "/Delete", "/F", "/TN", AUTOSTART_TASK]
+    if action == "status":
+        return ["schtasks", "/Query", "/TN", AUTOSTART_TASK, "/FO", "LIST"]
+    raise ValueError(f"unknown action {action!r}: on, off or status")
+
+
+@hub_app.command("autostart")
+def hub_autostart(action: str = typer.Argument(..., help="on | off | status")) -> None:
+    """Start the hub at logon (a Windows scheduled task running pythonw), stop doing so, or show the task."""
+    paths = OrqPaths.from_env()
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    try:
+        argv = autostart_argv(action, python=pythonw if pythonw.exists() else Path(sys.executable), log_file=paths.root / "hub.log")
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1)
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    output = (proc.stdout + proc.stderr).strip()
+    if proc.returncode != 0:
+        hint = " Run it again from a terminal opened as administrator." if "denied" in output.lower() else ""
+        typer.secho(f"schtasks failed: {output}{hint}", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    typer.echo(output)
+    if action == "on":
+        typer.echo(f"{AUTOSTART_TASK}: the hub starts at your next logon; logs in {paths.root / 'hub.log'}")
 
 
 project_app = typer.Typer(no_args_is_help=True, help="Projects: the GitHub repos orq works on.")

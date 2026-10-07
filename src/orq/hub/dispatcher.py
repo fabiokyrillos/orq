@@ -1,5 +1,8 @@
 """Hub dispatcher (Phase 5): start queued runs while the global and per-project limits leave room.
 
+Phase 6: it also resumes runs whose decision was answered while they had no process, so a WhatsApp answer no longer
+needs a RESUME. PAUSED runs are never resumed automatically.
+
 The run process takes its own slot (`Store.try_acquire_slot`); the dispatcher only avoids spawning processes that would
 sit waiting. A run spawned less than SPAWN_GRACE_SECONDS ago that has not registered yet counts as taking a slot.
 """
@@ -22,6 +25,8 @@ from orq.store.db import Store
 
 log = logging.getLogger("orq.hub.dispatcher")
 SPAWN_GRACE_SECONDS = 60
+# Queued runs, and (Phase 6) runs parked at a decision that has been answered while no process waits for it.
+DISPATCHABLE = {RunState.QUEUED, RunState.AWAITING_HUMAN, RunState.AWAITING_PLAN_APPROVAL}
 
 
 class Dispatcher:
@@ -46,6 +51,12 @@ class Dispatcher:
             return project.max_concurrent
         return self.config.queue.project_concurrency
 
+    def _answered(self, cp: Checkpoint) -> bool:
+        """A run parked at a decision whose process is gone (--no-prompt, crash, reboot) and whose answer has arrived."""
+        pending = cp.pending_decision or {}
+        decision = self.store.get_decision(pending.get("decision_id", "")) if pending else None
+        return cp.phase == "await" and decision is not None and decision.status == "answered"
+
     def tick(self) -> list[str]:
         """Spawn what fits now; return the run ids spawned."""
         now = self._clock()
@@ -55,7 +66,7 @@ class Dispatcher:
         total = len(registered)
         queued = []
         for run in reversed(self.store.list_runs()):  # oldest first
-            if run.state is not RunState.QUEUED or run.run_id in registered:
+            if run.state not in DISPATCHABLE or run.run_id in registered:
                 continue
             if run.run_id in self._spawned:
                 demand[run.repo] += 1
@@ -64,6 +75,8 @@ class Dispatcher:
             cp = Checkpoint.try_load(self.paths.run_dir(run.run_id) / "state.json")
             if cp is None or self._alive(cp.pid):
                 continue
+            if run.state is not RunState.QUEUED and not self._answered(cp):
+                continue  # still waiting for the owner, or paused on purpose
             queued.append((cp.phase == "setup", run))
         queued.sort(key=lambda item: item[0])  # runs that already started first; stable keeps the age order
         spawned = []
