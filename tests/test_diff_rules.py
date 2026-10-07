@@ -122,3 +122,23 @@ def test_violation_str_is_readable(repo: Path) -> None:
     gm.stage_all(repo)
     text = [str(v) for v in evaluate_staged(gm, repo, protected_paths=[], guard=GuardConfig())]
     assert "[deleted_file] routes.py: file deleted" in text
+
+
+# Phase 6: only removals of what the base branch has count
+
+def test_removing_what_this_run_added_is_not_a_violation(repo: Path) -> None:
+    gm = GitManager()
+    base = gm.head(repo)
+    (repo / "tests" / "test_new.py").write_text("def test_added_by_the_run():\n    assert True\n", encoding="utf-8")
+    (repo / "helper.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    gm.commit_all(repo, "iteration 1")
+    (repo / "tests" / "test_new.py").write_text("def test_renamed_later():\n    assert True\n", encoding="utf-8")
+    (repo / "helper.py").unlink()
+    (repo / "tests" / "test_app.py").write_text("", encoding="utf-8")   # this one exists on the base: still flagged
+    gm.stage_all(repo)
+
+    found = {(v.rule, v.path) for v in evaluate_staged(gm, repo, protected_paths=[], guard=GuardConfig(), base=base)}
+
+    assert found == {("removed_test", "tests/test_app.py")}
+    without_base = {(v.rule, v.path) for v in evaluate_staged(gm, repo, protected_paths=[], guard=GuardConfig())}
+    assert ("deleted_file", "helper.py") in without_base and ("removed_test", "tests/test_new.py") in without_base

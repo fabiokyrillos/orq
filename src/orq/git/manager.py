@@ -120,6 +120,12 @@ class GitManager:
                 out.append((int(parts[0]), int(parts[1]), parts[2]))
         return out
 
+    def show_file(self, worktree: Path, ref: str, path: str) -> str | None:
+        """The file's content at `ref`, or None when it does not exist there."""
+        proc = subprocess.run(["git", "show", f"{ref}:{path}"], cwd=str(worktree), capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        return proc.stdout if proc.returncode == 0 else None
+
     def staged_patch(self, worktree: Path) -> str:
         return self.git("diff", "--cached", "--no-color", "-M", cwd=worktree)
 

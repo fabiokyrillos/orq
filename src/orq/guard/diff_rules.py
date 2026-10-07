@@ -46,10 +46,20 @@ class DiffViolation:
         return f"[{self.rule}] {self.path}: {self.detail}"
 
 
-def evaluate_staged(git: GitManager, worktree: Path, *, protected_paths: list[str], guard: GuardConfig) -> list[DiffViolation]:
+def evaluate_staged(git: GitManager, worktree: Path, *, protected_paths: list[str], guard: GuardConfig,
+                    base: str | None = None) -> list[DiffViolation]:
+    """With `base` (the run's base commit), a removal only counts when the base has the removed thing: the run may
+    rework or drop what it added in an earlier iteration without asking the owner (Phase 6 finding)."""
     violations: list[DiffViolation] = []
+    base_text: dict[str, str | None] = {}
+
+    def on_base(path: str) -> str | None:
+        if path not in base_text:
+            base_text[path] = git.show_file(worktree, base, path) if base else ""
+        return base_text[path]
+
     for status, path in git.staged_name_status(worktree):
-        if status == "D":
+        if status == "D" and on_base(path) is not None:
             violations.append(DiffViolation("deleted_file", path, "file deleted"))
         for pattern in protected_paths:
             if glob_match(pattern, path):
@@ -59,24 +69,31 @@ def evaluate_staged(git: GitManager, worktree: Path, *, protected_paths: list[st
     removed, added = _split_patch(git.staged_patch(worktree))
     added_text = "\n".join(line for lines in added.values() for line in lines)
     for path, lines in removed.items():
+        original = on_base(path)
+        if original is None:
+            continue  # the file is new in this run: nothing the owner had is lost
+
+        def in_base(text: str) -> bool:
+            return not base or text in original  # type: ignore[operator]
+
         for line in lines:
             name = _first_match(_TEST_DEFS, line)
             if name:
-                if name not in added_text:
+                if name not in added_text and in_base(name):
                     violations.append(DiffViolation("removed_test", path, f"test {name} removed"))
                 continue
             name = _first_match(_EXPORT_DEFS, line)
             if name:
-                if not name.startswith("_") and not re.search(rf"\b{re.escape(name)}\b", added_text):
+                if not name.startswith("_") and not re.search(rf"\b{re.escape(name)}\b", added_text) and in_base(name):
                     violations.append(DiffViolation("removed_export", path, f"{name} removed"))
                 continue
             if _ROUTE_RE.search(line):
-                if line.strip() not in added_text:
+                if line.strip() not in added_text and in_base(line.strip()):
                     violations.append(DiffViolation("removed_route", path, line.strip()))
                 continue
             if _MANIFESTS.search(path):
                 dep = _DEP_LINE.match(line)
-                if dep and not _dependency_kept(dep.group(1), added.get(path, [])):
+                if dep and not _dependency_kept(dep.group(1), added.get(path, [])) and in_base(dep.group(1)):
                     violations.append(DiffViolation("dependency_removed", path, f"{dep.group(1)} removed"))
 
     net = 0

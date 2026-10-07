@@ -60,13 +60,15 @@ def guard_pre(description: str, rule: str | None, milestone: dict | None) -> dic
             "recommendation_reason": "orq never approves a destructive action blind; approve only if the task needs exactly this"}
 
 
-def guard_diff(violations: list, numstat: list[tuple[int, int, str]]) -> dict:
+def guard_diff(violations: list, numstat: list[tuple[int, int, str]], report: str = "") -> dict:
     counts = {path: (added, deleted) for added, deleted, path in numstat}
     lines = []
     for v in violations:
         added, deleted = counts.get(v.path, (0, 0))
         lines.append(f"- {v.path}: {DIFF_RULES.get(v.rule, v.rule)} [{v.rule}] ({v.detail}; +{added}/-{deleted} lines)")
-    return {"context": "This iteration's changes tripped the diff guard:\n" + "\n".join(lines),
+    said = " ".join(report.split())[:400]
+    return {"context": "This iteration's changes tripped the diff guard:\n" + "\n".join(lines) +
+                       (f"\nThe implementer's report: {said}" if said else ""),
             "option_details": ["the changes stay; the check runs and the iteration is committed",
                                "this turn's changes are thrown away (reset to the last iteration) and the implementer continues without them"],
             "recommendation_reason": "removals the task did not ask for are usually mistakes; approve if the task requires them"}

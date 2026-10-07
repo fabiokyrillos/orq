@@ -444,14 +444,16 @@ class Runner:
         if not self.cp.diff_approved:
             eff = self._effective()
             guard = GuardConfig(max_net_deleted_lines=eff["guard.max_net_deleted_lines"], source_globs=eff["guard.source_globs"])
-            violations = evaluate_staged(self.git, self.worktree, protected_paths=eff["git.protected_paths"], guard=guard)
+            violations = evaluate_staged(self.git, self.worktree, protected_paths=eff["git.protected_paths"], guard=guard,
+                                         base=self.cp.base_commit)
             if violations:
                 listing = "\n".join(f"- {v}" for v in violations)
                 self.rundir.event("diff_rules", iteration=it, violations=[str(v) for v in violations])
                 self._raise_decision("guard_diff", Decision(
                     decision_id=new_decision_id(), run_id=self.run_id, source="guard", decision_type="risk", destructive=True,
                     question="Keep these changes flagged by the diff guard?", options=["approve", "deny"], recommendation=1,
-                    **decision_text.guard_diff(violations, self.git.staged_numstat(self.worktree))), payload={"listing": listing})
+                    **decision_text.guard_diff(violations, self.git.staged_numstat(self.worktree), self.cp.report)),
+                    payload={"listing": listing})
                 return
         if self.cp.denied_actions and not self.git.staged_files(self.worktree):
             # The implementer stopped to ask for a destructive action and changed nothing: nothing to check or review.
