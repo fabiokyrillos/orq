@@ -241,7 +241,7 @@ Reply: D7K2 1  or  D7K2 <free text>
 
 **Commands:** `STATUS`, `PAUSE <run>`, `RESUME <run>`, `ABORT <run>`.
 
-Phase 4 implementation: `docs/n8n/orq-workflow.json` (webhooks `orq/notify`, `orq/replies`, `orq/replies/ack`, plus `orq/evolution` for Evolution's `MESSAGES_UPSERT`), `docs/n8n/orq_messages.sql`, `docs/n8n-setup.md`. Numbered replies are 1-based as printed in the message. `RESUME` spawns a detached `orq resume` on the PC; `ABORT` refuses a live run. Unknown messages get a one-line hint. Reminders are sent by the hub every `[notify].reminder_hours` while a decision is pending; run completions (`DONE`, `FAILED`, `ABORTED`) are announced once.
+Phase 4 implementation: `docs/n8n/orq-workflow.json` (webhooks `orq/notify`, `orq/replies`, `orq/replies/ack`, plus `orq/evolution` for Evolution's `MESSAGES_UPSERT`), `docs/n8n-setup.md`. Numbered replies are 1-based as printed in the message. `RESUME` spawns a detached `orq resume` on the PC; `ABORT` refuses a live run. Unknown messages get a one-line hint. Reminders are sent by the hub every `[notify].reminder_hours` while a decision is pending; run completions (`DONE`, `FAILED`, `ABORTED`) are announced once.
 
 **Note:** Evolution API uses an unofficial WhatsApp Web session. Use a dedicated sender number, not the owner's personal one.
 
