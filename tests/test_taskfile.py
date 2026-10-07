@@ -44,3 +44,13 @@ def test_empty_title_is_rejected_not_taken_from_the_next_heading() -> None:
     fields.title = "  "
     with pytest.raises(TaskError, match="Task"):
         parse_task(render_task(fields))
+
+
+def test_models_round_trip() -> None:
+    fields = full()
+    fields.models = {"reviewer": "gpt-6.1-sol", "routine_effort": "medium"}
+
+    task = parse_task(render_task(fields))
+
+    assert task.models == {"reviewer": "gpt-6.1-sol", "routine_effort": "medium"}
+    assert fields_from_task(task) == fields

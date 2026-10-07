@@ -106,6 +106,7 @@ class ClaudeImplementer:
 
 class ClaudeReviewer:
     name = "claude-reviewer"
+    kind = "claude"
 
     def __init__(self, model: str = "opus", argv_prefix: list[str] | None = None) -> None:
         self.model = model

@@ -14,7 +14,7 @@ def test_defaults_when_file_is_missing(tmp_path: Path) -> None:
     assert config.implementer.default_model == "opus"
     assert config.implementer.mechanical_model == "sonnet"
     assert config.reviewer.primary == "codex"
-    assert config.reviewer.codex_model == "gpt-5.5"
+    assert config.reviewer.codex_model == "gpt-6.1-sol" and config.reviewer.codex_windows_sandbox == "unelevated"
     assert config.reviewer.fallback == "claude"
     assert config.reviewer.routine_effort == "low"
     assert config.reviewer.final_effort == "high"

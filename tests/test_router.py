@@ -14,10 +14,12 @@ class Scripted:
     results: list[AgentResult]
     calls: int = 0
     sessions: list = field(default_factory=list)
+    models: list = field(default_factory=list)
 
     async def run(self, prompt, *, cwd, log_path, session_id=None, run_dir=None, on_event=None, **kwargs):
         self.calls += 1
         self.sessions.append(session_id)
+        self.models.append(kwargs.get("model"))
         return self.results.pop(0)
 
 
@@ -110,3 +112,14 @@ def test_router_forwards_effort_and_contract(tmp_path: Path) -> None:
     asyncio.run(router.run("p", cwd=tmp_path, log_path=tmp_path / "l.jsonl", session_id="s", effort="high", contract="PLAN"))
     assert seen == [{"name": "codex", "effort": "high", "contract": "PLAN", "session": "s"},
                     {"name": "claude", "effort": "high", "contract": "PLAN", "session": None}]
+
+
+def test_models_are_routed_to_the_agent_that_runs(tmp_path: Path) -> None:
+    primary = Scripted("codex", [AgentResult(ok=False, error="usage limit", error_kind="rate_limit")])
+    fallback = Scripted("claude", [AgentResult(ok=True, structured=GOOD)])
+    router = ReviewerRouter(primary, fallback, switch_at_used_percent=90, clock=lambda: 1000.0)
+
+    asyncio.run(router.run("p", cwd=tmp_path, log_path=tmp_path / "l.jsonl", model="gpt-6.1-sol", fallback_model="sonnet"))
+
+    assert primary.models == ["gpt-6.1-sol"] and fallback.models == ["sonnet"]
+    assert router.kind == "router"

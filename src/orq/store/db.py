@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS projects (
     local_path TEXT,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS slots (
     run_id TEXT PRIMARY KEY,
     repo TEXT NOT NULL,
@@ -76,7 +80,9 @@ _REGISTER_PROJECTS = """
 INSERT OR IGNORE INTO projects (repo, name, created_at)
 SELECT repo, substr(repo, instr(repo, '/') + 1), min(created_at) FROM runs {where} GROUP BY repo
 """
-_PROJECT_FIELDS = ("name", "base_branch", "check_command", "max_concurrent", "local_path")
+_PROJECT_FIELDS = ("name", "base_branch", "check_command", "max_concurrent", "local_path", "settings")
+# Columns added after a table first shipped: (table, column, definition).
+_MIGRATIONS = (("projects", "settings", "TEXT NOT NULL DEFAULT '{}'"),)
 
 
 def _now() -> str:
@@ -89,6 +95,10 @@ class Store:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)  # the hub serves requests from worker threads
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        for table, column, definition in _MIGRATIONS:
+            columns = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         self._conn.execute(_REGISTER_PROJECTS.format(where=""))
         self._conn.commit()
 
@@ -108,20 +118,20 @@ class Store:
 
     def upsert_project(self, project: Project) -> None:
         self._conn.execute(
-            "INSERT OR REPLACE INTO projects (repo, name, base_branch, check_command, max_concurrent, local_path, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, coalesce((SELECT created_at FROM projects WHERE repo = ?), ?))",
+            "INSERT OR REPLACE INTO projects (repo, name, base_branch, check_command, max_concurrent, local_path, settings, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, coalesce((SELECT created_at FROM projects WHERE repo = ?), ?))",
             (project.repo, project.name, project.base_branch, project.check_command, project.max_concurrent, project.local_path,
-             project.repo, project.created_at or _now()),
+             json.dumps(project.settings), project.repo, project.created_at or _now()),
         )
         self._conn.commit()
 
     def get_project(self, repo: str) -> Project | None:
         row = self._conn.execute("SELECT * FROM projects WHERE repo = ?", (repo,)).fetchone()
-        return Project(**dict(row)) if row else None
+        return _project_from_row(row) if row else None
 
     def list_projects(self) -> list[Project]:
         rows = self._conn.execute("SELECT * FROM projects ORDER BY lower(name), repo").fetchall()
-        return [Project(**dict(r)) for r in rows]
+        return [_project_from_row(r) for r in rows]
 
     def update_project(self, repo: str, **fields: object) -> None:
         unknown = set(fields) - set(_PROJECT_FIELDS)
@@ -129,8 +139,24 @@ class Store:
             raise ValueError(f"unknown project fields: {sorted(unknown)}")
         if not fields:
             return
+        if "settings" in fields:
+            fields["settings"] = json.dumps(fields["settings"] or {})
         assignments = ", ".join(f"{name} = ?" for name in fields)
         self._conn.execute(f"UPDATE projects SET {assignments} WHERE repo = ?", (*fields.values(), repo))
+        self._conn.commit()
+
+    # global setting overrides (Phase 6; orq.core.settings keys, values as JSON)
+
+    def get_settings(self) -> dict:
+        return {row["key"]: json.loads(row["value"]) for row in self._conn.execute("SELECT key, value FROM settings ORDER BY key")}
+
+    def set_settings(self, values: dict) -> None:
+        """None clears a key (the value is inherited again)."""
+        for key, value in values.items():
+            if value is None:
+                self._conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+            else:
+                self._conn.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, json.dumps(value)))
         self._conn.commit()
 
     def get_run(self, run_id: str) -> RunRecord | None:
@@ -284,6 +310,12 @@ def _run_from_row(row: sqlite3.Row) -> RunRecord:
     data = dict(row)
     data["state"] = RunState(data["state"])
     return RunRecord(**data)
+
+
+def _project_from_row(row: sqlite3.Row) -> Project:
+    data = dict(row)
+    data["settings"] = json.loads(data.get("settings") or "{}")
+    return Project(**data)
 
 
 def _decision_from_row(row: sqlite3.Row) -> Decision:

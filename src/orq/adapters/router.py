@@ -18,6 +18,8 @@ SwitchEvent = tuple[str, str, float | None]  # ("switched" | "restored", reviewe
 
 
 class ReviewerRouter:
+    kind = "router"
+
     def __init__(self, primary: Agent, fallback: Agent, *, switch_at_used_percent: int, clock: Callable[[], float] = time.time,
                  fallback_until: float | None = None, on_switch: Callable[[SwitchEvent], None] | None = None) -> None:
         self.primary, self.fallback = primary, fallback
@@ -41,17 +43,18 @@ class ReviewerRouter:
 
     async def run(self, prompt: str, *, cwd: Path, log_path: Path, session_id: str | None = None,
                   run_dir: Path | None = None, on_event: EventCallback | None = None, model: str | None = None,
-                  effort: str | None = None, contract: object | None = None) -> AgentResult:
+                  effort: str | None = None, contract: object | None = None, fallback_model: str | None = None) -> AgentResult:
+        """`model` goes to the primary, `fallback_model` to the fallback (they are different CLIs)."""
         common = dict(cwd=cwd, log_path=log_path, run_dir=run_dir, on_event=on_event, effort=effort, contract=contract)
         agent = self.active
         if agent is self.fallback:
             # The fallback cannot resume the primary's session.
-            return await self.fallback.run(prompt, session_id=None, **common)
-        result = await self.primary.run(prompt, session_id=session_id, **common)
+            return await self.fallback.run(prompt, session_id=None, model=fallback_model, **common)
+        result = await self.primary.run(prompt, session_id=session_id, model=model, **common)
         snapshot = (result.rate_limit or {}).get("primary") or {}
         if result.error_kind == "rate_limit":
             self._switch(snapshot.get("resets_at"))
-            return await self.fallback.run(prompt, session_id=None, **common)
+            return await self.fallback.run(prompt, session_id=None, model=fallback_model, **common)
         used = snapshot.get("used_percent")
         if isinstance(used, (int, float)) and used >= self.threshold:
             self._switch(snapshot.get("resets_at"))

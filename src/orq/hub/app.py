@@ -28,10 +28,12 @@ from orq.core.checkpoint import Checkpoint
 from orq.core.control import ControlError, abort_run, request_pause, spawn_resume
 from orq.core.models import Decision, Project, RunRecord, RunState
 from orq.core.projects import ProjectError, add_project
+from orq.core.settings import EFFORTS, KEYS, LIVE_KEYS, TASK_ALIASES, SettingsError, codex_models, resolve, validate_overrides
 from orq.core.queue import QueueError, enqueue
 from orq.core.summary import build_replay, load_summary
 from orq.core.task import TaskError, parse_task
 from orq.core.taskfile import TaskFields, render_task
+from orq.adapters.probe import probe_model
 from orq.git.manager import GitManager
 from orq.hub.dispatcher import Dispatcher
 from orq.hub.whatsapp_tasks import WhatsAppTasks
@@ -71,6 +73,13 @@ class ProjectPatch(BaseModel):
     base_branch: str | None = None
     check_command: str | None = None
     max_concurrent: int | None = None
+    settings: dict | None = None  # Phase 6 overrides; a None value clears that key
+
+
+class ModelTestBody(BaseModel):
+    kind: str
+    model: str
+    effort: str = "low"
 
 
 class FieldsBody(BaseModel):
@@ -82,6 +91,7 @@ class FieldsBody(BaseModel):
     check_command: str = ""
     base_branch: str = ""
     plan_approval: str = "required"
+    models: dict[str, str] = {}
 
 
 class TaskBody(BaseModel):
@@ -91,7 +101,8 @@ class TaskBody(BaseModel):
 
 
 def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | None = None, start_tasks: bool = True,
-               git: GitManager | None = None, allowed_hosts: set[str] | None = None, token: str | None = None) -> FastAPI:
+               git: GitManager | None = None, allowed_hosts: set[str] | None = None, token: str | None = None,
+               models_cache: Path | None = None, probe=None) -> FastAPI:
     store = Store(paths.db)
     git = git or GitManager()
     tasks = WhatsAppTasks(store, paths, config, whatsapp) if whatsapp is not None else None
@@ -99,6 +110,8 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
     port = config.dashboard.port
     hosts = allowed_hosts or {f"127.0.0.1:{port}", f"localhost:{port}"}
     secret = token or secrets.token_urlsafe(32)
+    probe = probe or (lambda kind, model, effort: probe_model(kind, model, effort=effort,
+                                                              windows_sandbox=config.reviewer.codex_windows_sandbox))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -142,7 +155,48 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
         data = asdict(project)
         data["effective_max_concurrent"] = project.max_concurrent or config.queue.project_concurrency
         data["counts"] = {group: (counts or Counter())[group] for group in STATE_GROUPS}
+        eff = resolve(config, store.get_settings(), project.settings, {})
+        data["effective"], data["sources"] = eff.values, eff.sources
         return data
+
+    def validated(overrides: dict, base: dict) -> dict:
+        """Validate a change against the layer it lands in; efforts are checked on the model that will run them."""
+        merged = {**base, **overrides}
+        codex_model = merged.get("reviewer.codex_model") or resolve(config, store.get_settings(), {}, {})["reviewer.codex_model"]
+        try:
+            validate_overrides(overrides, cache_path=models_cache, codex_model=codex_model)
+            clean = validate_overrides({k: v for k, v in merged.items() if v is not None}, cache_path=models_cache, codex_model=codex_model)
+        except SettingsError as exc:
+            raise HTTPException(400, str(exc))
+        return {k: v for k, v in clean.items() if v is not None}
+
+    def settings_payload() -> dict:
+        eff = resolve(config, store.get_settings(), {}, {})
+        return {"overrides": store.get_settings(), "effective": eff.values, "sources": eff.sources, "keys": list(KEYS),
+                "live_keys": list(LIVE_KEYS), "efforts": list(EFFORTS), "codex_models": codex_models(models_cache),
+                "claude_models": ["opus", "sonnet", "haiku"], "task_aliases": TASK_ALIASES}
+
+    @app.get("/api/settings")
+    async def get_settings() -> dict:
+        return settings_payload()
+
+    @app.put("/api/settings")
+    async def put_settings(body: dict) -> dict:
+        current = store.get_settings()
+        keep = validated(body, current)
+        store.set_settings({**{k: None for k in current if k not in keep}, **keep})
+        return settings_payload()
+
+    @app.get("/api/models")
+    async def models() -> dict:
+        return {"codex": codex_models(models_cache), "claude": ["opus", "sonnet", "haiku"], "efforts": list(EFFORTS)}
+
+    @app.post("/api/models/test")
+    async def test_model(body: ModelTestBody) -> dict:
+        if body.kind not in ("codex", "claude"):
+            raise HTTPException(400, f"unknown model kind {body.kind}")
+        ok, message = await asyncio.to_thread(probe, body.kind, body.model, body.effort)
+        return {"ok": ok, "message": message}
 
     @app.get("/api/projects")
     async def projects() -> list[dict]:
@@ -167,7 +221,10 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
         slug = f"{owner}/{repo}"
         if store.get_project(slug) is None:
             raise HTTPException(404, f"no project {slug}")
-        store.update_project(slug, **body.model_dump(exclude_unset=True))
+        changes = body.model_dump(exclude_unset=True)
+        if "settings" in changes:
+            changes["settings"] = validated(changes["settings"] or {}, store.get_project(slug).settings)  # type: ignore[union-attr]
+        store.update_project(slug, **changes)
         return project_dict(store.get_project(slug))  # type: ignore[arg-type]
 
     # tasks and queue
@@ -184,7 +241,7 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
         return render_task(TaskFields(
             title=f.title, repo=project.repo, goal=f.goal, check_command=f.check_command or project.check_command,
             base_branch=f.base_branch or project.base_branch, acceptance_criteria=f.acceptance_criteria,
-            out_of_scope=f.out_of_scope, constraints=f.constraints, plan_approval=f.plan_approval))
+            out_of_scope=f.out_of_scope, constraints=f.constraints, plan_approval=f.plan_approval, models=f.models))
 
     def validate(body: TaskBody, text: str) -> list[str]:
         try:
@@ -193,6 +250,15 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
             return [str(exc)]
         if task.repo != body.project:
             return [f"the task names {task.repo} but the project is {body.project}"]
+        if task.models:
+            project = store.get_project(body.project)
+            base = resolve(config, store.get_settings(), project.settings if project else {}, {})
+            overrides = {TASK_ALIASES[k]: v for k, v in task.models.items()}
+            try:
+                validate_overrides(overrides, cache_path=models_cache,
+                                   codex_model=overrides.get("reviewer.codex_model") or base["reviewer.codex_model"])
+            except SettingsError as exc:
+                return [f"Models: {exc}"]
         return []
 
     @app.post("/api/tasks/preview")

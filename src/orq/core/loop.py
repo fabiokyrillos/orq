@@ -19,7 +19,7 @@ from pathlib import Path
 
 from orq.adapters.base import Agent, AgentResult
 from orq.adapters.schema import PLAN_CONTRACT, REVIEW_CONTRACT, validate_plan, validate_review
-from orq.config import Config
+from orq.config import Config, GuardConfig
 from orq.core.answers import record_answer
 from orq.core.checkpoint import Checkpoint
 from orq.core.hygiene import drop_orchestrator_milestones, review_complains_about_sandbox, strip_sandbox_complaints
@@ -29,6 +29,7 @@ from orq.core.progress import ProgressTracker
 from orq.core.prompts import (IMPLEMENTER_RULES, build_implementer_prompt, build_planner_prompt, build_reviewer_prompt,
                               guard_outcome_lines, plan_markdown)
 from orq.core.queue import QueueError, check_sandbox, create_run
+from orq.core.settings import Effective, resolve
 from orq.core.summary import write_summary
 from orq.core.ratelimit import claude_reset_time
 from orq.core.task import Task, parse_task
@@ -100,7 +101,8 @@ class Runner:
             self.run_id, self.cp = checkpoint.run_id, checkpoint
             self.rundir = RunDir(paths.run_dir(self.run_id))
         self.progress = ProgressTracker(self.cp.progress_history)
-        write_hook_settings(self.rundir.path, worktree=self.worktree, protected_paths=config.git.protected_paths)
+        # Guard settings are taken when the run starts or resumes (the hook reads this file); models before every call.
+        write_hook_settings(self.rundir.path, worktree=self.worktree, protected_paths=self._effective()["git.protected_paths"])
         if self.cp.reviewer_fallback_until is not None and hasattr(self.reviewer, "fallback_until"):
             self.reviewer.fallback_until = self.cp.reviewer_fallback_until  # type: ignore[attr-defined]
         self._save()
@@ -175,6 +177,24 @@ class Runner:
         self.cp.state = state.value
         self._save()
         self.print(f"[{self.run_id}] {state.value}" + (f" {data}" if data else ""))
+
+    def _effective(self) -> Effective:
+        """Settings in layers (Phase 6): TASK.md `## Models` > project > dashboard overrides > config.toml."""
+        project = self.store.get_project(self.task.repo)
+        return resolve(self.config, self.store.get_settings(), project.settings if project else {}, self.task.models)
+
+    def _review_options(self, agent: Agent, effort_key: str) -> dict:
+        """Model and effort for a planner or reviewer call; a router gets the Claude model for its fallback."""
+        eff = self._effective()
+        kind = getattr(agent, "kind", "codex")
+        options: dict = {"effort": eff[effort_key]}
+        if kind == "claude":
+            options["model"] = eff["reviewer.claude_model"]
+        else:
+            options["model"] = eff["reviewer.codex_model"]
+            if kind == "router":
+                options["fallback_model"] = eff["reviewer.claude_model"]
+        return options
 
     def _set_phase(self, phase: str) -> None:
         self.cp.phase = phase
@@ -319,11 +339,11 @@ class Runner:
         prompt = build_planner_prompt(self.task, decisions=self.rundir.decisions_text(), feedback=self.cp.plan_feedback)
         (self.rundir.path / "planner.prompt.md").write_text(prompt, encoding="utf-8")
         result = await self._call("planner", self.planner, prompt, self.rundir.path / "planner.stream.jsonl", None,
-                                  effort=self.config.reviewer.final_effort, contract=PLAN_CONTRACT)
+                                  contract=PLAN_CONTRACT, **self._review_options(self.planner, "reviewer.final_effort"))
         if result.error_kind == "invalid_output":
             self.rundir.event("planner_invalid_output", error=result.error)
             result = await self._call("planner", self.planner, prompt, self.rundir.path / "planner.stream.jsonl", None,
-                                      effort=self.config.reviewer.final_effort, contract=PLAN_CONTRACT)
+                                      contract=PLAN_CONTRACT, **self._review_options(self.planner, "reviewer.final_effort"))
         problems = validate_plan(result.structured)
         if problems:
             raise _Stop(RunState.FAILED, "planner output invalid: " + "; ".join(problems))
@@ -360,10 +380,11 @@ class Runner:
         return milestones[min(self.cp.milestone_index, len(milestones) - 1)]
 
     def _implementer_model(self) -> str:
+        eff = self._effective()
         milestone = self._current_milestone() or {}
         if milestone.get("difficulty") == "mechanical":
-            return self.config.implementer.mechanical_model
-        return self.config.implementer.default_model
+            return eff["implementer.mechanical_model"]
+        return eff["implementer.default_model"]
 
     def _next_iteration(self) -> None:
         if self.cp.iteration >= self.config.limits.max_iterations:
@@ -418,7 +439,9 @@ class Runner:
                 options=["rescan", "abort"], recommendation=0), payload={})
             return
         if not self.cp.diff_approved:
-            violations = evaluate_staged(self.git, self.worktree, protected_paths=self.config.git.protected_paths, guard=self.config.guard)
+            eff = self._effective()
+            guard = GuardConfig(max_net_deleted_lines=eff["guard.max_net_deleted_lines"], source_globs=eff["guard.source_globs"])
+            violations = evaluate_staged(self.git, self.worktree, protected_paths=eff["git.protected_paths"], guard=guard)
             if violations:
                 listing = "\n".join(f"- {v}" for v in violations)
                 self.rundir.event("diff_rules", iteration=it, violations=[str(v) for v in violations])
@@ -464,7 +487,7 @@ class Runner:
             plan=self.cp.plan, milestone_index=self.cp.milestone_index,
         )
         (itdir / "reviewer.prompt.md").write_text(prompt, encoding="utf-8")
-        review = await self._run_review(prompt, itdir / "reviewer.stream.jsonl", effort=self.config.reviewer.routine_effort, check_ok=check.ok)
+        review = await self._run_review(prompt, itdir / "reviewer.stream.jsonl", effort_key="reviewer.routine_effort", check_ok=check.ok)
         (itdir / "reviewer.output.json").write_text(json.dumps(review, indent=2), encoding="utf-8")
         self.cp.discarded = None
         self.cp.summaries[str(it)] = str(review.get("summary", ""))
@@ -510,25 +533,28 @@ class Runner:
             return
         self._after_review()
 
-    async def _run_review(self, prompt: str, log_path: Path, *, effort: str, check_ok: bool) -> dict:
+    async def _run_review(self, prompt: str, log_path: Path, *, effort_key: str, check_ok: bool) -> dict:
         """Call the reviewer, retry once on invalid output, correct sandbox-tooling complaints once, strip the rest."""
-        review = await self._review_once(prompt, log_path, effort)
+        review = await self._review_once(prompt, log_path, effort_key)
         if check_ok and review_complains_about_sandbox(review):
             self.rundir.event("reviewer_sandbox_retry", iteration=self.cp.iteration)
             correction = (prompt + "\n\n## Correction\nYour previous answer reported that the check command or python could not be run "
                           "in your environment. The orchestrator already ran the check command in the real environment and it passed "
                           "(see the result above). Do not run it and do not report tool availability. Answer again on the code alone.\n")
-            review = await self._review_once(correction, log_path, effort)
+            review = await self._review_once(correction, log_path, effort_key)
             review, stripped = strip_sandbox_complaints(review)
             if stripped:
                 self.rundir.event("reviewer_sandbox_complaint_stripped", iteration=self.cp.iteration)
         return review
 
-    async def _review_once(self, prompt: str, log_path: Path, effort: str) -> dict:
-        result = await self._call("reviewer", self.reviewer, prompt, log_path, None, effort=effort, contract=REVIEW_CONTRACT)
+    async def _review_once(self, prompt: str, log_path: Path, effort_key: str) -> dict:
+        # Resolved per call: a model or effort changed in the dashboard applies from the next review on.
+        result = await self._call("reviewer", self.reviewer, prompt, log_path, None, contract=REVIEW_CONTRACT,
+                                  **self._review_options(self.reviewer, effort_key))
         if result.error_kind == "invalid_output":
             self.rundir.event("reviewer_invalid_output", iteration=self.cp.iteration, error=result.error)
-            result = await self._call("reviewer", self.reviewer, prompt, log_path, None, effort=effort, contract=REVIEW_CONTRACT)
+            result = await self._call("reviewer", self.reviewer, prompt, log_path, None, contract=REVIEW_CONTRACT,
+                                      **self._review_options(self.reviewer, effort_key))
         problems = validate_review(result.structured)
         if problems:
             raise _Stop(RunState.FAILED, "reviewer output invalid: " + "; ".join(problems))
@@ -632,7 +658,7 @@ class Runner:
             decisions=self.rundir.decisions_text(), plan=self.cp.plan, milestone_index=self.cp.milestone_index, final=True, ci_result=ci_note,
         )
         (itdir / "final_review.prompt.md").write_text(prompt, encoding="utf-8")
-        review = await self._run_review(prompt, itdir / "final_review.stream.jsonl", effort=self.config.reviewer.final_effort, check_ok=check.ok)
+        review = await self._run_review(prompt, itdir / "final_review.stream.jsonl", effort_key="reviewer.final_effort", check_ok=check.ok)
         (itdir / "final_review.output.json").write_text(json.dumps(review, indent=2), encoding="utf-8")
         self.rundir.event("final_review", status=review["status"], summary=str(review.get("summary", ""))[:300])
         if review["status"] == "needs_human":
@@ -682,6 +708,7 @@ class Runner:
         while True:
             result = await agent.run(prompt, cwd=self.worktree, log_path=log_path, session_id=session_id, run_dir=self.rundir.path, **options)
             self.rundir.event(role, ok=result.ok, error_kind=result.error_kind, session_id=result.session_id,
+                              model=options.get("model"), effort=options.get("effort"), agent=getattr(agent, "name", role),
                               usage=result.usage, rate_limit=result.rate_limit)
             self._persist_router_state()
             if result.ok or result.error_kind == "invalid_output":

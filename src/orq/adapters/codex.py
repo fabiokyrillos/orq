@@ -73,11 +73,14 @@ def codex_argv() -> list[str]:
 
 class CodexReviewer:
     name = "codex-reviewer"
+    kind = "codex"
 
-    def __init__(self, model: str, effort: str = "low", ignore_user_config: bool = False, argv_prefix: list[str] | None = None) -> None:
+    def __init__(self, model: str, effort: str = "low", ignore_user_config: bool = False, argv_prefix: list[str] | None = None,
+                 windows_sandbox: str = "unelevated") -> None:
         self.model = model
         self.effort = effort
         self.ignore_user_config = ignore_user_config
+        self.windows_sandbox = windows_sandbox
         self._prefix = argv_prefix
         self.last_rate_limits: dict | None = None
 
@@ -96,7 +99,10 @@ class CodexReviewer:
                 "-c", f'model_reasoning_effort="{effort or self.effort}"']
         if self.ignore_user_config:
             # Keeps the owner's plugins, hooks and MCP servers out; the Windows sandbox setting must then be restated.
-            argv += ["--ignore-user-config", "-c", 'windows.sandbox="elevated"']
+            argv.append("--ignore-user-config")
+        if self.windows_sandbox:
+            # CLI 0.161.0: "elevated" fails to provision here; "unelevated" reads, runs python and blocks writes (Phase 6).
+            argv += ["-c", f'windows.sandbox="{self.windows_sandbox}"']
         argv.append("-")  # prompt on stdin
 
         completed = await stream_process(argv, cwd=cwd, stdin_text=prompt, log_path=log_path, env=clean_env(), on_event=on_event)

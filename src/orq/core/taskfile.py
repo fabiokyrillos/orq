@@ -18,6 +18,7 @@ class TaskFields:
     out_of_scope: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
     plan_approval: str = "required"
+    models: dict = field(default_factory=dict)  # optional per-task models and efforts (Phase 6)
 
 
 def _items(values: list[str]) -> list[str]:
@@ -32,10 +33,14 @@ def render_task(fields: TaskFields) -> str:
     if _items(fields.constraints):
         lines += ["## Constraints", *[f"- {c}" for c in _items(fields.constraints)]]
     lines += ["## Check command", fields.check_command.strip(), "## Plan approval", fields.plan_approval.strip() or "required"]
+    models = {k: v.strip() for k, v in (fields.models or {}).items() if v and v.strip()}
+    if models:
+        lines += ["## Models", *[f"{k}: {v}" for k, v in models.items()]]
     return "\n".join(lines) + "\n"
 
 
 def fields_from_task(task: Task) -> TaskFields:
     return TaskFields(title=task.title, repo=task.repo, base_branch=task.base_branch, goal=task.goal,
                       acceptance_criteria=list(task.acceptance_criteria), out_of_scope=list(task.out_of_scope),
-                      constraints=list(task.constraints), check_command=task.check_command, plan_approval=task.plan_approval)
+                      constraints=list(task.constraints), check_command=task.check_command, plan_approval=task.plan_approval,
+                      models=dict(task.models))

@@ -74,15 +74,17 @@ def _start_terminal_thread(paths: OrqPaths, run_id: str) -> None:
 
 
 def _build_reviewer(config: Config):
+    # Models and efforts given here are only defaults: the runner resolves them before every call (Phase 6 settings).
+    claude_model = config.reviewer.claude_model or config.implementer.default_model
     if config.reviewer.primary == "claude":
-        return ClaudeReviewer(model=config.implementer.default_model)
+        return ClaudeReviewer(model=claude_model)
     codex = CodexReviewer(model=config.reviewer.codex_model, effort=config.reviewer.routine_effort,
-                          ignore_user_config=config.reviewer.codex_ignore_user_config)
+                          ignore_user_config=config.reviewer.codex_ignore_user_config,
+                          windows_sandbox=config.reviewer.codex_windows_sandbox)
     if config.reviewer.fallback != "claude":
         return codex
     # Codex usage limit -> Claude reviewer until the limit resets (SPEC 12).
-    return ReviewerRouter(codex, ClaudeReviewer(model=config.implementer.default_model),
-                          switch_at_used_percent=config.reviewer.switch_at_used_percent)
+    return ReviewerRouter(codex, ClaudeReviewer(model=claude_model), switch_at_used_percent=config.reviewer.switch_at_used_percent)
 
 
 def _runner_parts(config: Config) -> dict:

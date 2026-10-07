@@ -26,13 +26,16 @@ class ImplementerConfig:
 @dataclass
 class ReviewerConfig:
     primary: str = "codex"
-    codex_model: str = "gpt-5.5"
+    codex_model: str = "gpt-6.1-sol"
+    claude_model: str = ""                 # Claude reviewer (primary or fallback); empty follows implementer.default_model
     fallback: str = "claude"
     routine_effort: str = "low"
     final_effort: str = "high"
     switch_at_used_percent: int = 90
     # Keeps the owner's Codex plugins, hooks and MCP servers out of reviewer calls (about 30% fewer tokens).
     codex_ignore_user_config: bool = True
+    # Restated because the user config is ignored. On CLI 0.161.0 only "unelevated" starts processes read-only (Phase 6).
+    codex_windows_sandbox: str = "unelevated"
 
 
 @dataclass

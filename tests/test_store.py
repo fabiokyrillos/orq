@@ -170,3 +170,28 @@ def test_a_better_waiter_that_cannot_run_does_not_block(store: Store) -> None:
     assert not acquire(store, "A2", "o/a", limit=3, fresh=False)     # blocked by its project cap, not by the global one
 
     assert acquire(store, "B1", "o/b", limit=3)                      # a free global slot is not held back for A2
+
+
+# settings (Phase 6)
+
+def test_global_settings_set_and_clear(store: Store) -> None:
+    store.set_settings({"reviewer.codex_model": "gpt-6.1-sol", "git.protected_paths": ["db/**"]})
+    store.set_settings({"reviewer.codex_model": None, "reviewer.routine_effort": "medium"})
+
+    assert store.get_settings() == {"git.protected_paths": ["db/**"], "reviewer.routine_effort": "medium"}
+
+
+def test_project_settings_round_trip_and_migration(tmp_path: Path) -> None:
+    import sqlite3
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)  # a Phase 5 database: projects without the settings column
+    conn.executescript("CREATE TABLE projects (repo TEXT PRIMARY KEY, name TEXT NOT NULL, base_branch TEXT NOT NULL DEFAULT 'main', "
+                       "check_command TEXT NOT NULL DEFAULT '', max_concurrent INTEGER, local_path TEXT, created_at TEXT NOT NULL);"
+                       "INSERT INTO projects (repo, name, created_at) VALUES ('o/a', 'a', 'now');")
+    conn.commit()
+    conn.close()
+
+    store = Store(db)
+    assert store.get_project("o/a").settings == {}
+    store.update_project("o/a", settings={"reviewer.codex_model": "gpt-6-sol"})
+    assert store.get_project("o/a").settings == {"reviewer.codex_model": "gpt-6-sol"}

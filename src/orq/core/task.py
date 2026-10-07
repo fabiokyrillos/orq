@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from orq.core.settings import TASK_ALIASES
 
 _REPO_RE = re.compile(r"^(?P<repo>[\w.-]+/[\w.-]+)(?:\s*,\s*base branch\s+(?P<base>\S+))?$")
 _BULLET_RE = re.compile(r"^\s*[-*]\s*(?:\[[ xX]\]\s*)?(.*\S)")
@@ -25,6 +27,7 @@ class Task:
     constraints: list[str]
     check_command: str
     plan_approval: str
+    models: dict = field(default_factory=dict)  # optional `## Models` (Phase 6): TASK_ALIASES keys
 
     @property
     def slug(self) -> str:
@@ -61,6 +64,7 @@ def parse_task(text: str) -> Task:
         constraints=_bullets(sections.get("Constraints", "")),
         check_command=_required(sections, "Check command"),
         plan_approval=plan_approval,
+        models=_models(sections.get("Models", "")),
     )
 
 
@@ -85,6 +89,23 @@ def _required(sections: dict[str, str], name: str) -> str:
     if not value:
         raise TaskError(f"missing or empty section: {name}")
     return value
+
+
+def _models(block: str) -> dict[str, str]:
+    """`key: value` lines, optionally bulleted; keys are the short aliases of orq.core.settings.TASK_ALIASES."""
+    models: dict[str, str] = {}
+    for line in block.splitlines():
+        text = line.strip().lstrip("-* ").strip()
+        if not text:
+            continue
+        key, sep, value = text.partition(":")
+        key, value = key.strip(), value.strip()
+        if not sep or not value:
+            raise TaskError(f"Models: expected 'key: value', got {text!r}")
+        if key not in TASK_ALIASES:
+            raise TaskError(f"Models: unknown key {key!r} (one of {', '.join(TASK_ALIASES)})")
+        models[key] = value
+    return models
 
 
 def _bullets(block: str) -> list[str]:

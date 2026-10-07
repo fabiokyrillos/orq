@@ -88,3 +88,15 @@ def test_missing_or_invalid_required_section_raises(broken: str, section: str) -
 def test_invalid_plan_approval_raises() -> None:
     with pytest.raises(TaskError, match="Plan approval"):
         parse_task(FULL.replace("skip", "maybe"))
+
+
+def test_models_section_is_optional_and_validated() -> None:
+    assert parse_task(FULL).models == {}
+
+    task = parse_task(FULL + "## Models\n- reviewer: gpt-6.1-sol\nfinal_effort: xhigh\nimplementer: sonnet\n")
+
+    assert task.models == {"reviewer": "gpt-6.1-sol", "final_effort": "xhigh", "implementer": "sonnet"}
+    with pytest.raises(TaskError, match="Models"):
+        parse_task(FULL + "## Models\nplanner: gpt-6.1-sol\n")
+    with pytest.raises(TaskError, match="Models"):
+        parse_task(FULL + "## Models\njust text\n")

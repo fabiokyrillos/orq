@@ -416,3 +416,67 @@ def test_sse_follow_handles_crlf_files_without_repeating_lines(tmp_path: Path) -
     chunks = asyncio.run(collect())
 
     assert chunks == ['data: {"n": 1}\n\n', 'data: {"n": 2}\n\n', 'data: {"n": 2.5}\n\n', 'data: {"n": 3}\n\n', 'data: {"n": 4}\n\n']
+
+
+# Phase 6: settings and models
+
+def settings_client(home: OrqPaths, tmp_path: Path, probe=None) -> TestClient:
+    cache = tmp_path / "models_cache.json"
+    cache.write_text(json.dumps({"models": [
+        {"slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "visibility": "list",
+         "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh", "max", "ultra")]},
+        {"slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list",
+         "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh")]}]}), encoding="utf-8")
+    app = create_app(home, Config(), start_tasks=False, git=fake_git(), allowed_hosts={"testserver"}, models_cache=cache,
+                     probe=probe or (lambda kind, model, effort: (True, "OK")))
+    return TestClient(app, headers={"X-Orq-Token": app.state.token})
+
+
+def test_global_settings_read_write_and_validate(home: OrqPaths, tmp_path: Path) -> None:
+    c = settings_client(home, tmp_path)
+
+    before = c.get("/api/settings").json()
+    assert before["effective"]["reviewer.codex_model"] == "gpt-6.1-sol" and before["sources"]["reviewer.codex_model"] == "config"
+    assert [m["slug"] for m in before["codex_models"]] == ["gpt-6.1-sol", "gpt-5.5"]
+
+    after = c.put("/api/settings", json={"reviewer.codex_model": "gpt-5.5", "reviewer.final_effort": "xhigh"}).json()
+    assert after["effective"]["reviewer.codex_model"] == "gpt-5.5" and after["sources"]["reviewer.final_effort"] == "global"
+    bad = c.put("/api/settings", json={"reviewer.final_effort": "max"})  # gpt-5.5 stops at xhigh
+    assert bad.status_code == 400 and "does not support max" in bad.json()["error"]
+    cleared = c.put("/api/settings", json={"reviewer.codex_model": None, "reviewer.final_effort": None}).json()
+    assert cleared["sources"]["reviewer.codex_model"] == "config"
+
+
+def test_project_settings_override_and_report_sources(home: OrqPaths, tmp_path: Path) -> None:
+    seed(home)
+    c = settings_client(home, tmp_path)
+    c.put("/api/settings", json={"implementer.default_model": "sonnet"})
+
+    project = c.patch("/api/projects/owner/sandbox", json={"settings": {"git.protected_paths": ["db/**"], "reviewer.codex_model": "gpt-5.5"}}).json()
+
+    assert project["settings"] == {"git.protected_paths": ["db/**"], "reviewer.codex_model": "gpt-5.5"}
+    assert project["effective"]["git.protected_paths"] == ["db/**"] and project["sources"]["git.protected_paths"] == "project"
+    assert project["effective"]["implementer.default_model"] == "sonnet" and project["sources"]["implementer.default_model"] == "global"
+    again = c.patch("/api/projects/owner/sandbox", json={"settings": {"reviewer.codex_model": None}}).json()
+    assert again["settings"] == {"git.protected_paths": ["db/**"]}
+    assert c.patch("/api/projects/owner/sandbox", json={"settings": {"nope": 1}}).status_code == 400
+
+
+def test_model_test_endpoint_uses_the_probe(home: OrqPaths, tmp_path: Path) -> None:
+    calls: list = []
+    c = settings_client(home, tmp_path, probe=lambda kind, model, effort: calls.append((kind, model, effort)) or (False, "not supported"))
+
+    r = c.post("/api/models/test", json={"kind": "codex", "model": "gpt-x"}).json()
+
+    assert r == {"ok": False, "message": "not supported"} and calls == [("codex", "gpt-x", "low")]
+    assert c.post("/api/models/test", json={"kind": "other", "model": "x"}).status_code == 400
+
+
+def test_task_with_models_is_validated(home: OrqPaths, tmp_path: Path) -> None:
+    c = settings_client(home, tmp_path)
+    c.post("/api/projects", json={"source": "owner/a", "check_command": "pytest"})
+
+    ok = c.post("/api/tasks/preview", json={"project": "owner/a", "fields": {**FIELDS, "models": {"reviewer": "gpt-5.5", "final_effort": "high"}}}).json()
+    assert ok["errors"] == [] and "## Models\nreviewer: gpt-5.5\nfinal_effort: high" in ok["markdown"]
+    bad = c.post("/api/tasks/preview", json={"project": "owner/a", "fields": {**FIELDS, "models": {"reviewer": "gpt-5.5", "final_effort": "max"}}}).json()
+    assert bad["errors"] and "does not support max" in bad["errors"][0]

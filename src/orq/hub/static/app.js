@@ -67,6 +67,7 @@ const routes = [
   [/^#\/p\/([^/]+\/[^/]+)\/(runs|queue|new|settings)$/, (m) => projectPage(m[1], m[2])],
   [/^#\/run\/([A-Z0-9]+)(?:\/(live|summary|replay))?$/, (m) => runPage(m[1], m[2] || 'live')],
   [/^#\/add-project$/, () => addProjectPage()],
+  [/^#\/settings$/, () => globalSettingsPage()],
   [/^#\/all$/, () => allRuns()],
 ];
 
@@ -173,6 +174,7 @@ function newTaskTab(el, p) {
             <div><label>Base branch</label><input name="base_branch" placeholder="${esc(p.base_branch)}"></div>
           </div>
           <label>Plan approval</label><select name="plan_approval"><option value="required">required: I approve the plan first</option><option value="skip">skip: straight to work</option></select>
+          <details style="margin-top:12px"><summary class="muted">Models for this task only (optional)</summary><div id="task-models" class="muted">loading…</div></details>
         </form>
         <div id="md-box" hidden><label>TASK.md</label><textarea id="md" rows="18" placeholder="# Task: ...\n## Repo\n${esc(p.repo)}, base branch ${esc(p.base_branch)}"></textarea></div>
         <div class="errors" id="task-errors"></div>
@@ -181,10 +183,20 @@ function newTaskTab(el, p) {
       <div class="card pane"><h3>Preview</h3><pre id="preview" class="muted">Fill in the form.</pre></div>
     </div>`;
   let mode = 'form';
+  let aliases = {};
+  api('/api/settings').then(payload => {
+    aliases = Object.fromEntries(Object.entries(payload.task_aliases).map(([alias, key]) => [key, alias]));
+    $('#task-models').innerHTML = settingsForm(payload, {}, p.effective, p.sources, 'task');
+    $('#task-models').classList.remove('muted');
+    bindModelTests($('#task-models'));
+  });
+  const taskModels = () => Object.fromEntries(Object.entries(readSettings($('#task-models')))
+    .filter(([key, v]) => v !== null && aliases[key]).map(([key, v]) => [aliases[key], String(v)]));
   const body = () => {
     if (mode === 'md') return { project: p.repo, markdown: $('#md').value };
     const f = new FormData($('#task-form'));
     return { project: p.repo, fields: {
+      models: taskModels(),
       title: f.get('title'), goal: f.get('goal'), acceptance_criteria: lines(f.get('acceptance_criteria')),
       out_of_scope: lines(f.get('out_of_scope')), constraints: lines(f.get('constraints')),
       check_command: f.get('check_command'), base_branch: f.get('base_branch'), plan_approval: f.get('plan_approval') } };
@@ -226,7 +238,19 @@ function settingsTab(el, p) {
     <div class="hint">Two runs on one repo at once often meet in a rebase conflict, which comes back to you as a decision.</div>
     <div style="margin-top:12px"><button class="primary" id="s-save">Save</button><span class="msg" id="s-msg"></span></div>
     ${p.local_path ? `<div class="hint">Added from ${esc(p.local_path)}. orq works in its own clone, never in that folder.</div>` : ''}
-  </div>`;
+  </div>
+  <div class="card" style="max-width:760px" id="ps"><h3 class="muted small">MODELS AND GUARD FOR THIS PROJECT</h3><div class="muted">loading…</div></div>`;
+  api('/api/settings').then(payload => {
+    $('#ps').innerHTML = `<h3 class="muted small">MODELS AND GUARD FOR THIS PROJECT</h3>${settingsForm(payload, p.settings, p.effective, p.sources, 'project')}
+      <div style="margin-top:12px"><button class="primary" id="ps-save">Save</button><span class="msg" id="ps-msg"></span></div>`;
+    bindModelTests($('#ps'));
+    $('#ps-save').onclick = async () => {
+      try {
+        await api(`/api/projects/${p.repo}`, { method: 'PATCH', body: JSON.stringify({ settings: readSettings($('#ps')) }) });
+        await route(); $('#ps-msg').textContent = 'saved';
+      } catch (e) { $('#ps-msg').textContent = e.message; $('#ps-msg').className = 'msg err'; }
+    };
+  });
   $('#s-save').onclick = async () => {
     const max = $('#s-max').value.trim();
     try {
@@ -254,6 +278,87 @@ function addProjectPage() {
       location.hash = `${projectPath(p.repo)}/new`;
     } catch (e) { $('#p-msg').textContent = e.message; $('#p-msg').className = 'msg err'; }
     finally { $('#p-add').disabled = false; }
+  };
+}
+
+// settings (Phase 6): one form for the global layer and for a project's layer
+
+const SETTING_LABELS = {
+  'implementer.default_model': ['Implementer model', 'Claude model for hard milestones and runs without a plan'],
+  'implementer.mechanical_model': ['Implementer model, mechanical', 'Claude model for milestones the planner marks mechanical'],
+  'reviewer.codex_model': ['Planner and reviewer model', 'Codex model; changes apply from the next call, even in running runs'],
+  'reviewer.claude_model': ['Claude reviewer model', 'when the reviewer is Claude (primary or fallback after a Codex limit)'],
+  'reviewer.routine_effort': ['Review effort', 'reasoning effort of the milestone reviews'],
+  'reviewer.final_effort': ['Planning and final review effort', 'reasoning effort of the plan and the review before merge'],
+  'git.protected_paths': ['Protected paths', 'one glob per line; the guard asks before any change there (applies when a run starts)'],
+  'guard.max_net_deleted_lines': ['Max net deleted lines', 'per iteration, before the diff guard asks'],
+  'guard.source_globs': ['Source files', 'one glob per line; what counts for the deleted-lines rule'],
+};
+
+function settingInput(key, payload, layerValue, inherited) {
+  const id = `set-${key.replace(/\./g, '-')}`;
+  const shown = layerValue ?? '';
+  const ph = Array.isArray(inherited) ? inherited.join('\n') : inherited;
+  if (key === 'reviewer.codex_model') {
+    const opts = payload.codex_models.map(m => `<option value="${esc(m.slug)}" ${m.slug === shown ? 'selected' : ''}>${esc(m.display_name)} (${esc(m.slug)})</option>`).join('');
+    return `<select id="${id}" data-key="${key}"><option value="">inherit: ${esc(ph)}</option>${opts}</select>`;
+  }
+  if (key.endsWith('_effort')) {
+    return `<select id="${id}" data-key="${key}"><option value="">inherit: ${esc(ph)}</option>${payload.efforts.map(e => `<option ${e === shown ? 'selected' : ''}>${e}</option>`).join('')}</select>`;
+  }
+  if (Array.isArray(inherited)) {
+    return `<textarea id="${id}" data-key="${key}" data-list="1" rows="3" placeholder="inherit:\n${esc(ph)}">${esc(Array.isArray(shown) ? shown.join('\n') : '')}</textarea>`;
+  }
+  if (typeof inherited === 'number') return `<input id="${id}" data-key="${key}" data-int="1" type="number" min="1" value="${esc(shown)}" placeholder="inherit: ${esc(ph)}">`;
+  return `<input id="${id}" data-key="${key}" list="claude-models" value="${esc(shown)}" placeholder="inherit: ${esc(ph)}">`;
+}
+
+function settingsForm(payload, layer, effective, sources, layerName) {
+  const rows = payload.keys.filter(k => layerName === 'task' ? payload.live_keys.includes(k) : true).map(key => {
+    const [label, hint] = SETTING_LABELS[key] || [key, ''];
+    const src = sources[key];
+    const test = key.endsWith('_model') ? `<button type="button" data-test="${key}">Test</button><span class="msg small" data-test-msg="${key}"></span>` : '';
+    return `<div class="setting"><label>${esc(label)} <span class="chip">${esc(src === layerName ? 'set here' : 'from ' + src)}</span></label>
+      <div style="display:flex;gap:6px;align-items:flex-start">${settingInput(key, payload, layer[key], effective[key])}${test}</div>
+      <div class="hint">${esc(hint)} · now: <span class="mono">${esc(Array.isArray(effective[key]) ? effective[key].join(', ') : effective[key])}</span></div></div>`;
+  }).join('');
+  return `<datalist id="claude-models">${payload.claude_models.map(m => `<option value="${m}">`).join('')}</datalist>${rows}`;
+}
+
+function readSettings(el) {
+  const out = {};
+  $$('[data-key]', el).forEach(input => {
+    const v = input.value.trim();
+    if (!v) out[input.dataset.key] = null;
+    else if (input.dataset.list) out[input.dataset.key] = lines(v);
+    else if (input.dataset.int) out[input.dataset.key] = Number(v);
+    else out[input.dataset.key] = v;
+  });
+  return out;
+}
+
+function bindModelTests(el) {
+  $$('[data-test]', el).forEach(b => b.onclick = async () => {
+    const key = b.dataset.test;
+    const input = $(`[data-key="${key}"]`, el);
+    const model = input.value.trim() || (input.placeholder || '').replace(/^inherit: /, '');
+    const kind = key === 'reviewer.codex_model' ? 'codex' : 'claude';
+    const msg = $(`[data-test-msg="${key}"]`, el);
+    msg.textContent = 'testing…'; msg.className = 'msg small';
+    try { const r = await post('/api/models/test', { kind, model }); msg.textContent = r.ok ? `OK (${model})` : r.message; msg.className = `msg small ${r.ok ? '' : 'err'}`; }
+    catch (e) { msg.textContent = e.message; msg.className = 'msg small err'; }
+  });
+}
+
+async function globalSettingsPage() {
+  const s = await api('/api/settings');
+  view.innerHTML = `<div class="head"><div><h1>Settings</h1><div class="muted small">Defaults for every project. A project or a task can override them. Models and efforts apply from the next agent call, also in running runs.</div></div></div>
+    <div class="card" style="max-width:760px" id="gs">${settingsForm(s, s.overrides, s.effective, s.sources, 'global')}
+      <div style="margin-top:12px"><button class="primary" id="gs-save">Save</button><span class="msg" id="gs-msg"></span></div></div>`;
+  bindModelTests($('#gs'));
+  $('#gs-save').onclick = async () => {
+    try { await api('/api/settings', { method: 'PUT', body: JSON.stringify(readSettings($('#gs'))) }); await route(); $('#gs-msg').textContent = 'saved'; }
+    catch (e) { $('#gs-msg').textContent = e.message; $('#gs-msg').className = 'msg err'; }
   };
 }
 

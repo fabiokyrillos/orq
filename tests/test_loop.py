@@ -1084,3 +1084,67 @@ def test_run_parked_at_a_decision_writes_no_summary(env) -> None:
 
     assert asyncio.run(runner.execute()) is RunState.AWAITING_HUMAN
     assert not (runner.rundir.path / "summary.json").exists()
+
+
+# live settings (Phase 6)
+
+def test_models_and_efforts_are_resolved_before_every_call(env) -> None:
+    make, paths, _ = env
+    implementer = FakeImplementer([ok(), ok()])
+    reviewer = FakeReviewer([review("done", None), review("done", None)])  # milestone 1, milestone 2, then the final review
+    planner = FakePlanner([plan(("first", "mechanical"), ("second", "hard"))])
+    runner = make(implementer, reviewer, planner=planner)
+    calls: list[dict] = []
+    original = reviewer.run
+
+    async def spy(prompt, **kwargs):
+        calls.append({k: kwargs.get(k) for k in ("model", "effort")})
+        if len(calls) == 1:  # the owner changes the reviewer while the run is going
+            runner.store.set_settings({"reviewer.codex_model": "gpt-6-sol", "reviewer.routine_effort": "medium"})
+        return await original(prompt, **kwargs)
+
+    reviewer.run = spy
+    runner.store.set_settings({"reviewer.codex_model": "gpt-6.1-sol", "implementer.mechanical_model": "haiku"})
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert planner.calls[0]["model"] == "gpt-6.1-sol" and planner.calls[0]["effort"] == "high"
+    assert calls[0] == {"model": "gpt-6.1-sol", "effort": "low"}
+    assert calls[1] == {"model": "gpt-6-sol", "effort": "medium"}       # next call after the change
+    assert calls[-1] == {"model": "gpt-6-sol", "effort": "high"}         # final review uses final_effort
+    assert implementer.models == ["haiku", "opus"]                       # mechanical, then hard
+    events = gate_events(paths, runner.run_id)
+    reviews = [e for e in events if e["type"] == "reviewer"]
+    assert reviews[0]["model"] == "gpt-6.1-sol" and reviews[1]["model"] == "gpt-6-sol" and reviews[1]["effort"] == "medium"
+
+
+def test_task_models_section_wins_over_project_and_global(env) -> None:
+    make, paths, _ = env
+    task_text = TASK + "## Models\nimplementer: sonnet\nreviewer: gpt-5.5\n"
+    reviewer = FakeReviewer([review("done", None)])
+    calls: list[str] = []
+    original = reviewer.run
+
+    async def spy(prompt, **kwargs):
+        calls.append(kwargs.get("model"))
+        return await original(prompt, **kwargs)
+
+    reviewer.run = spy
+    implementer = FakeImplementer([ok()])
+    runner = make(implementer, reviewer, task_text=task_text)
+    runner.store.update_project("owner/sandbox", settings={"reviewer.codex_model": "gpt-6-sol", "implementer.default_model": "opus"})
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert calls and set(calls) == {"gpt-5.5"} and implementer.models == ["sonnet"]
+
+
+def test_project_protected_paths_reach_the_hook_and_the_diff_rules(env) -> None:
+    make, paths, _ = env
+    from orq.core.models import Project
+    store = Store(paths.db)
+    store.upsert_project(Project(repo="owner/sandbox", name="sandbox", settings={"git.protected_paths": ["greeting*.txt"]}))
+    runner = make(FakeImplementer([ok()]), FakeReviewer([]), human=None)
+
+    guard = json.loads((runner.rundir.path / "guard.json").read_text(encoding="utf-8"))
+    assert guard["protected_paths"] == ["greeting*.txt"]
+    assert asyncio.run(runner.execute()) is RunState.AWAITING_HUMAN  # greeting1.txt is now protected
+    assert "protected_path" in runner.store.pending_decisions(runner.run_id)[0].question

@@ -223,7 +223,18 @@ def test_codex_ignore_user_config_adds_flags(record, tmp_path, monkeypatch) -> N
 
     argv = record()["argv"]
     assert "--ignore-user-config" in argv
-    assert 'windows.sandbox="elevated"' in argv
+    # CLI 0.161.0: the elevated sandbox cannot provision on this PC; unelevated reads, runs python, blocks writes (Phase 6).
+    assert 'windows.sandbox="unelevated"' in argv
+
+
+def test_codex_sandbox_mode_and_model_per_call(record, tmp_path, monkeypatch) -> None:
+    scenario(monkeypatch, "ok")
+
+    asyncio.run(codex(ignore_user_config=True, windows_sandbox="mxc").run("review it", cwd=tmp_path, log_path=tmp_path / "c.jsonl",
+                                                                          model="gpt-6.1-sol"))
+
+    argv = record()["argv"]
+    assert 'windows.sandbox="mxc"' in argv and argv[argv.index("-m") + 1] == "gpt-6.1-sol"
 
 
 def test_codex_api_error_is_reported(record, tmp_path, monkeypatch) -> None:
