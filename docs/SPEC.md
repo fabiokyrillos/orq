@@ -3,7 +3,7 @@
 **Spec version:** 1.0
 **Date:** 2026-10-05
 **Owner:** Binho (Fábio Kyrillos)
-**Status:** Phases 0 and 1 complete (see `docs/phase0-findings.md`, `docs/phase1-findings.md`). Ready for Phase 2.
+**Status:** Phases 0 to 5 complete (see `docs/phase*-findings.md`).
 
 ---
 
@@ -75,8 +75,9 @@ Components:
 * **GitManager:** worktrees, branches, commits, rebase, PR and merge via `gh`.
 * **Verifier:** runs the task's local check command and reads GitHub Actions status.
 * **Notifier:** Windows toast plus WhatsApp via n8n. Phase 4: the toast is shown by the run process (`notify/toast.py`); WhatsApp belongs to the hub.
-* **Store:** SQLite for runs, queue, decisions; files for raw logs.
+* **Store:** SQLite for runs, decisions, projects and concurrency slots; files for raw logs.
 * **Hub / Dashboard (Phase 4, `orq dashboard`):** one long-lived FastAPI process on 127.0.0.1 that serves the dashboard (run list, both live streams over SSE, decision controls, pause/abort/resume) and owns the WhatsApp channel: it sends new decisions and run completions, reminds after `reminder_hours`, polls n8n for replies, applies them and acks. Runs never talk to n8n.
+* **Projects, queue and dispatcher (Phase 5):** a project is one GitHub repo (`owner/repo`); runs join it on their `repo`. Queued runs have no process until the hub's dispatcher spawns them (`orq resume`) within the global and per-project limits (section 10.1). The hub also creates projects and queued tasks, and serves run summaries and replay. Every non-GET request needs a token generated when the hub starts and embedded in the page, and requests for any Host other than `127.0.0.1:<port>`/`localhost:<port>` are refused.
 
 Rejected alternatives (for the record):
 
@@ -99,6 +100,7 @@ Every transition is written to `events.jsonl` and to SQLite before it takes effe
 * `orq resume` refuses a run whose process is still alive, a `DONE`/`ABORTED` run, and a worktree whose HEAD moved away from the last recorded commit (the one exception is the iteration commit itself, when the crash landed between the commit and the next checkpoint write).
 * `orq pause` drops a `pause.requested` flag; the loop stops between phases with state `PAUSED`.
 * Decisions are answered either in the terminal of the live process or, after a crash or kill, with `orq answer` followed by `orq resume`.
+* Phase 5: `QUEUED` means "waiting for a slot". A queued run has its run dir, `TASK.md` and a checkpoint at phase `setup` with `pid = 0`, but no process and no worktree. A run that answered a decision and finds no free slot also waits in `QUEUED`. When a run ends (`DONE`, `FAILED`, `ABORTED`) it writes `summary.json`.
 
 ## 7. One iteration
 
@@ -255,6 +257,7 @@ Windows toast on every new decision and on run completion or failure. Phase 4: `
 
 * Max iterations per run (default 15) and max wall time (default 6 h).
 * Max concurrent runs (default 2), because subscription limits are shared.
+* Phase 5: a run takes a slot (SQLite table `slots`, one `BEGIN IMMEDIATE` transaction) before agent work and gives it back when it raises a decision and when it ends; waiting for the owner costs no subscription time. `PAUSED_RATE_LIMIT` keeps its slot. A slot is granted when the global count is under `[limits].max_concurrent_runs`, the project's count is under its own cap (`max_concurrent`, default `[queue].project_concurrency` = 1) and no better waiter could take it first: runs that already started go before runs that never ran, then oldest first. Rows of dead processes are dropped on the next acquire. Time spent waiting for a slot or for the owner does not count toward `max_wall_hours`.
 
 ### 10.2 No progress detection
 
@@ -301,7 +304,7 @@ Implemented in Phase 2 (`src/orq/guard/diff_rules.py`), evaluated on the staged 
 
 ### 10.6 Git strategy
 
-* One worktree per run, outside the repo: `<worktree_root>\<repo>\<run_id>`, default root `%USERPROFILE%\.orq\worktrees`. Set `core.longpaths=true` in the repo config; without it, checkout fails past 260 characters.
+* One worktree per run, outside the repo: `<worktree_root>\<repo>\<run_id>`, default root `%USERPROFILE%\.orq\worktrees`. Phase 5: the clone lives at `repos\<owner>\<repo>` (older clones at `repos\<repo>` stay for the runs that reference them), and concurrent runs share it: git commands that write shared refs or the worktree list (clone, fetch, worktree add/remove, branch delete, push, `gh pr merge`) take a cross-process lock `<clone>.orq.lock`, which the OS releases when a process dies. Set `core.longpaths=true` in the repo config; without it, checkout fails past 260 characters.
 * Worktree config also sets `core.autocrlf=false`; the owner's global `autocrlf=true` would otherwise rewrite line endings in public repos.
 * `core.longpaths` only fixes git. Python, PowerShell 5.1 (which Codex uses to read files) and other tools still fail past 260 characters unless Windows `LongPathsEnabled=1`. Prerequisite: the owner enables it, or sets a short `worktree_root` such as `C:\orq-wt`.
 * Branch `orq/<task-slug>`; if it already exists locally or on origin, `orq/<task-slug>-<run_id>`.
@@ -339,13 +342,16 @@ Never inside the repo (repos are public):
 
 ```
 %USERPROFILE%\.orq\
-  orq.db                     # SQLite: runs, queue, decisions
+  orq.db                     # SQLite: runs, decisions, projects, slots, notifications
   config.toml                # global config (secrets via env vars)
+  repos\<owner>\<repo>\        # orq's own clone per project (never the owner's checkout)
+  tasks\                     # the owner's TASK.md files (optional)
   worktrees\<repo>\<run_id>\
   runs\<run_id>\
     TASK.md
     DECISIONS.md
     state.json               # checkpoint: phase, pending decision, sessions, commits (crash recovery)
+    summary.json             # written when the run ends (Phase 5)
     events.jsonl             # every event, timestamped
     claude-settings.json     # attaches the guard hook (--settings)
     guard.json               # worktree path and protected paths for the hook
@@ -382,7 +388,7 @@ Never inside the repo (repos are public):
 [limits]
 max_iterations = 15
 max_wall_hours = 6
-max_concurrent_runs = 2
+max_concurrent_runs = 2      # global; runs waiting for the owner do not count
 rate_limit_retries = 3
 
 [implementer]
@@ -426,12 +432,19 @@ reminder_hours = 3
 
 [dashboard]
 port = 8765                               # 127.0.0.1 only
+
+[queue]
+poll_seconds = 5                          # hub dispatcher tick and a run's wait for a slot
+project_concurrency = 1                   # active runs per project unless the project sets its own
 ```
 
 ## 14. CLI surface
 
 ```
-orq run <TASK.md> [--repo <path|owner/repo>] [--plan-approval required|skip] [--no-prompt]
+orq run <TASK.md> [--no-prompt]
+orq queue <TASK.md>
+orq project add <owner/repo|folder> [--name] [--base] [--check] [--max-concurrent]
+orq project list
 orq status [<run_id>]
 orq answer <decision_id> "<text>" | <option index> | --approve | --deny
 orq pause | abort <run_id>
@@ -440,6 +453,8 @@ orq rollback <run_id> --to <n>
 orq logs <run_id> [--follow]
 orq dashboard [--port <n>]
 ```
+
+`orq queue` only queues; the hub starts the run when a slot is free (or `orq resume <run_id>` by hand). `orq status` shows slot usage and the queue length. A project added from a folder only reads that folder's `origin`; orq always works in its own clone.
 
 `orq run` and `orq resume` wait for decisions to be answered from any channel (type in the terminal, use the dashboard, reply on WhatsApp, or `orq answer` elsewhere); `--no-prompt` exits at the decision instead. `orq dashboard` is the hub (section 5); WhatsApp works only while it runs.
 
@@ -512,6 +527,11 @@ Status: complete on 2026-10-07 (see `docs/phase4-findings.md`): run `RHGBG6` was
 
 * Queue with concurrent runs and global concurrency limit.
 * Run summaries and replay in the dashboard.
+* Added by the owner: several projects in one dashboard, tasks created and queued from the dashboard, projects added by `owner/repo` or local folder.
+
+**Exit criteria:** with `max_concurrent_runs = 2`, three tasks created and queued from the dashboard across two projects; two run at once and the third starts when a slot frees; a run parked on a decision does not block the queue; all three end with a merged PR; every finished run shows its summary and can be replayed iteration by iteration.
+
+Status: complete on 2026-10-07 (see `docs/phase5-findings.md`).
 
 ## 16. Non goals
 
