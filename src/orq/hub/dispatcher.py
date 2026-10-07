@@ -62,6 +62,8 @@ class Dispatcher:
         now = self._clock()
         self._spawned = {r: t for r, t in self._spawned.items() if now - t < SPAWN_GRACE_SECONDS}
         registered = {row["run_id"]: row for row in self.store.slot_usage() if self._alive(row["pid"])}
+        for run_id in registered:
+            self._spawned.pop(run_id, None)  # it registered: from now on the slot table speaks for it (Phase 6 finding)
         demand = Counter(row["repo"] for row in registered.values())  # held or waiting: both will use a slot
         total = len(registered)
         queued = []

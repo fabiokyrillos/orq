@@ -185,3 +185,22 @@ def test_queue_order_and_moves(home: OrqPaths) -> None:
     spawn = Spawner()
     Dispatcher(store, home, config(global_limit=1), spawn=spawn).tick()
     assert spawn.spawned == [b]  # the dispatcher follows the queue order
+
+
+def test_a_spawned_run_that_registered_and_released_its_slot_no_longer_counts(home: OrqPaths) -> None:
+    store = Store(home.db)
+    first = enqueue(home, store, config(), TASK.format(repo="owner/a"))
+    second = enqueue(home, store, config(), TASK.format(repo="owner/b"))
+    spawn = Spawner()
+    clock = [100.0]
+    dispatcher = Dispatcher(store, home, config(global_limit=1), spawn=spawn, clock=lambda: clock[0], alive=lambda pid: pid == 7)
+    assert dispatcher.tick() == [first]
+
+    store.try_acquire_slot(first, "owner/a", 7, fresh=True, global_limit=1, default_project_limit=1, alive=lambda pid: pid == 7)
+    clock[0] += 5
+    assert dispatcher.tick() == []                     # first holds the only slot
+    store.release_slot(first)                           # it parks at a decision (its process stays alive, waiting)
+    store.set_state(first, RunState.AWAITING_HUMAN)
+    clock[0] += 5                                       # still inside the 60 s spawn grace
+
+    assert dispatcher.tick() == [second]
