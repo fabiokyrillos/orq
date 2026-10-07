@@ -964,3 +964,30 @@ def test_terminal_callback_records_through_the_shared_recorder(env) -> None:
     assert asyncio.run(runner.execute()) is RunState.DONE
     answered = [e for e in gate_events(paths, runner.run_id) if e["type"] == "answer"]
     assert answered and answered[0]["via"] == "terminal" and answered[0]["answer"] == "deny"
+
+
+# Phase 4: desktop notifications
+
+
+def test_notifier_called_on_decisions_and_terminal_states(env) -> None:
+    make, paths, _ = env
+    toasts: list[tuple[str, str]] = []
+    runner = make(FakeImplementer([denied("rm -rf x"), ok()]), FakeReviewer([review("continue", "go"), review("done", None)]), human=lambda d: "approve")
+    runner.notifier = lambda title, message: toasts.append((title, message)) or True
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert any("needs you" in t and "rm -rf x" in m for t, m in toasts)
+    assert toasts[-1][0].endswith("DONE") and "pull/1" in toasts[-1][1]
+    assert sum(1 for e in gate_events(paths, runner.run_id) if e["type"] == "notified") == len(toasts)
+
+
+def test_notifier_failure_is_logged_not_raised(env) -> None:
+    make, paths, _ = env
+
+    def broken(title: str, message: str) -> bool:
+        raise RuntimeError("no desktop")
+
+    runner = make(FakeImplementer([AgentResult(ok=False, error="boom", error_kind="error")]), FakeReviewer([]), human=lambda d: "abort")
+    runner.notifier = broken
+    assert asyncio.run(runner.execute()) is RunState.ABORTED
+    assert any(e["type"] == "toast_failed" for e in gate_events(paths, runner.run_id))

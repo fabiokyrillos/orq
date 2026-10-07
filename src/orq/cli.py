@@ -23,6 +23,7 @@ from orq.core.models import Decision, RunState
 from orq.core.procs import pid_alive
 from orq.core.task import TaskError, parse_task
 from orq.git.manager import GitError, GitManager
+from orq.notify.toast import show_toast
 from orq.paths import OrqPaths
 from orq.store.db import Store
 from orq.store.rundir import RunDir
@@ -88,6 +89,7 @@ def _runner_parts(config: Config) -> dict:
         git=GitManager(),
         implementer=ClaudeImplementer(model=config.implementer.default_model, system_prompt=implementer_system_prompt()),
         reviewer=_build_reviewer(config), scanner=SecretScanner(),
+        notifier=show_toast if config.notify.toast else None,
     )
 
 

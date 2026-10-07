@@ -43,6 +43,7 @@ from orq.verify.secrets import SecretScanner
 
 HumanInput = Callable[[Decision], str]
 Printer = Callable[[str], None]
+Notifier = Callable[[str, str], bool]  # (title, message) -> shown
 
 DIFF_INLINE_LIMIT = 20_000
 CHECK_TIMEOUT_SECONDS = 1800
@@ -77,7 +78,7 @@ class Runner:
                  git: GitManager, implementer: Agent, reviewer: Agent, scanner: SecretScanner, human: HumanInput | None,
                  clone_url: str | None = None, printer: Printer = print, run_id: str | None = None,
                  checkpoint: Checkpoint | None = None, planner: Agent | None = None, ci: CiWatcher | None = None,
-                 wait_for_answers: bool = False) -> None:
+                 wait_for_answers: bool = False, notifier: Notifier | None = None) -> None:
         if config.git.sandbox_repos and task.repo not in config.git.sandbox_repos:
             raise SandboxError(f"{task.repo} is not listed in [git].sandbox_repos (empty list allows any repo)")
         self.config, self.paths, self.store, self.task = config, paths, store, task
@@ -88,6 +89,7 @@ class Runner:
         self.human, self.clone_url, self.print = human, clone_url, printer
         # No callback and wait_for_answers: block on SQLite until some channel answers (terminal thread, dashboard, WhatsApp).
         self.wait_for_answers = wait_for_answers
+        self.notifier = notifier  # local desktop toast (SPEC 9.4); WhatsApp belongs to the hub
         self._resumed_at = time.monotonic()
         if checkpoint is None:
             self.run_id = run_id or new_run_id()
@@ -120,7 +122,8 @@ class Runner:
     @classmethod
     def resume(cls, *, run_id: str, config: Config, paths: OrqPaths, store: Store, git: GitManager, implementer: Agent,
                reviewer: Agent, scanner: SecretScanner, human: HumanInput | None, printer: Printer = print,
-               planner: Agent | None = None, ci: CiWatcher | None = None, wait_for_answers: bool = False) -> Runner:
+               planner: Agent | None = None, ci: CiWatcher | None = None, wait_for_answers: bool = False,
+               notifier: Notifier | None = None) -> Runner:
         """Rebuild a Runner from state.json. Refuses live runs, finished runs and worktrees that moved."""
         rundir = RunDir(paths.run_dir(run_id))
         cp = Checkpoint.load(rundir.path / "state.json")
@@ -161,7 +164,7 @@ class Runner:
         rundir.event("resume", phase=cp.phase, iteration=cp.iteration, state=cp.state)
         return cls(config=config, paths=paths, store=store, task=task, task_text=task_text, git=git, implementer=implementer,
                    reviewer=reviewer, scanner=scanner, human=human, printer=printer, checkpoint=cp, planner=planner, ci=ci,
-                   wait_for_answers=wait_for_answers)
+                   wait_for_answers=wait_for_answers, notifier=notifier)
 
     # persistence
 
@@ -215,6 +218,7 @@ class Runner:
                     if self._gate_merge():
                         self._set_phase("done")
                         self._transition(RunState.DONE)
+                        self._notify(f"orq {self.run_id} DONE", f"{self.task.title}: PR merged {self.cp.pr_url or ''}".strip())
                         return RunState.DONE
                 elif phase == "done":
                     return RunState.DONE
@@ -226,7 +230,19 @@ class Runner:
             if stop.state is RunState.AWAITING_HUMAN:  # already recorded when the decision was raised
                 return RunState(self.cp.state)
             self._transition(stop.state, reason=stop.reason)
+            if stop.state in (RunState.FAILED, RunState.ABORTED):
+                self._notify(f"orq {self.run_id} {stop.state.value}", f"{self.task.title}: {stop.reason}")
             return stop.state
+
+    def _notify(self, title: str, message: str) -> None:
+        if self.notifier is None:
+            return
+        try:
+            shown = self.notifier(title, message)
+        except Exception as exc:  # noqa: BLE001 - a notification must never stop a run
+            self.rundir.event("toast_failed", error=repr(exc))
+            return
+        self.rundir.event("notified" if shown else "toast_failed", channel="toast", title=title)
 
     def _check_wall_time(self) -> None:
         elapsed_hours = (self.cp.elapsed_seconds + (time.monotonic() - self._resumed_at)) / 3600
@@ -680,6 +696,7 @@ class Runner:
         self.cp.pending_decision = {"decision_id": decision.decision_id, "kind": kind, "payload": payload}
         self.cp.phase = "await"
         self._transition(state, decision_id=decision.decision_id)
+        self._notify(f"orq {self.run_id} needs you ({decision.decision_id})", decision.question)
 
     async def _await(self) -> None:
         pending = self.cp.pending_decision
