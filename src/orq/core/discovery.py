@@ -99,7 +99,7 @@ def list_github(gh: GhRunner) -> list[RemoteRepo]:
 
 def candidates(store: Store, git: GitManager, roots: list[str], depth: int) -> dict:
     """What the Add project page offers: local folders first, then GitHub repos that are not on this PC."""
-    added = {p.repo.lower() for p in store.list_projects()}
+    added = {p.repo.lower() for p in store.list_projects() if p.status != "removed"}  # a removed project can come back
     with ThreadPoolExecutor(max_workers=1) as pool:
         listing = pool.submit(list_github, git.gh)  # gh runs while the folders are scanned
         local = scan_local(roots, depth, git)

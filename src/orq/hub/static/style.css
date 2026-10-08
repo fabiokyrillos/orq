@@ -45,7 +45,7 @@ main { min-width: 0; padding: 18px 24px 40px; margin-left: 248px; }
 .head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
 .head h1 { font: 600 20px/1.2 var(--ui); margin: 0 0 4px; letter-spacing: .02em; }
 .tabs { display: flex; gap: 2px; }
-.tabs a { padding: 8px 14px; color: var(--muted); border-bottom: 2px solid transparent; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; }
+.tabs a { white-space: nowrap; padding: 8px 14px; color: var(--muted); border-bottom: 2px solid transparent; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; }
 .tabs a.active { color: var(--text); border-bottom-color: var(--accent); }
 .tabs a:hover { color: var(--text); }
 .empty { color: var(--muted); padding: 40px 0; }

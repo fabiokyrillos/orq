@@ -106,3 +106,14 @@ def test_candidates_still_list_local_folders_when_gh_fails(root: Path, tmp_path:
     assert [r["repo"] for r in result["local"]] == ["owner/alpha", "owner/beta"]
     assert result["github"] == [] and "HTTP 401" in result["github_error"]
     assert result["local"][0]["private"] is None
+
+
+def test_a_removed_project_can_be_added_again(root: Path, tmp_path: Path) -> None:
+    store = Store(tmp_path / "orq.db")
+    store.upsert_project(Project(repo="owner/beta", name="beta", status="removed"))
+    store.upsert_project(Project(repo="owner/old", name="old", status="archived"))
+
+    result = candidates(store, GitManager(gh=gh_listing(REPOS)), [str(root)], 3)
+
+    assert [(r["repo"], r["added"]) for r in result["local"]] == [("owner/alpha", False), ("owner/beta", False)]
+    assert ("owner/old", True) in [(r["repo"], r["added"]) for r in result["github"]]  # archived: restore it instead
