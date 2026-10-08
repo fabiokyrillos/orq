@@ -109,3 +109,17 @@ def test_probe_claude(monkeypatch: pytest.MonkeyPatch) -> None:
     assert probe_model("claude", "sonnet", run=fake_run(json.dumps({"is_error": False, "result": "OK"}), calls)) == (True, "OK")
     assert calls[0][calls[0].index("--model") + 1] == "sonnet"
     assert probe_model("claude", "nope", run=fake_run(json.dumps({"is_error": True, "result": "model not found"}), [])) == (False, "model not found")
+
+
+def test_scan_roots_are_global_settings_only() -> None:
+    config = Config()
+    config.projects.scan_roots = ["D:/a"]
+    eff = resolve(config, {"projects.scan_depth": 2}, {}, {})
+    assert (eff["projects.scan_roots"], eff.source("projects.scan_roots")) == (["D:/a"], "config")
+    assert eff["projects.scan_depth"] == 2
+
+    assert validate_overrides({"projects.scan_roots": [" D:/Projetos/GitHub "]}) == {"projects.scan_roots": ["D:/Projetos/GitHub"]}
+    with pytest.raises(SettingsError, match="global"):
+        validate_overrides({"projects.scan_roots": ["D:/x"]}, layer="project")
+    with pytest.raises(SettingsError):
+        validate_overrides({"projects.scan_depth": 0})

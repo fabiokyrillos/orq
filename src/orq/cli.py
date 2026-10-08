@@ -324,6 +324,28 @@ def project_add(
     typer.echo(f"project {project.repo} ({project.name}), base {project.base_branch}")
 
 
+@project_app.command("candidates")
+def project_candidates() -> None:
+    """Repos to add: your local checkouts under projects.scan_roots first, then GitHub repos not on this PC."""
+    from orq.core.discovery import candidates
+    from orq.core.settings import resolve
+
+    paths = OrqPaths.from_env()
+    store = Store(paths.db)
+    eff = resolve(load_config(paths.config), store.get_settings(), {}, {})
+    found = candidates(store, GitManager(), eff["projects.scan_roots"], eff["projects.scan_depth"])
+    typer.echo(f"On this PC ({', '.join(found['roots']) or 'no projects.scan_roots set'}):")
+    for r in found["local"]:
+        marks = " ".join(m for m in ("private" if r["private"] else "", "added" if r["added"] else "") if m)
+        typer.echo(f"  {r['repo']:<40} {r['path']}  [{r['branch'] or 'detached'}, {r['dirty']} uncommitted] {marks}".rstrip())
+    typer.echo("Only on GitHub:")
+    if found["github_error"]:
+        typer.secho(f"  gh failed: {found['github_error']}", fg=typer.colors.RED)
+    for r in found["github"]:
+        marks = " ".join(m for m in ("private" if r["private"] else "", "added" if r["added"] else "") if m)
+        typer.echo(f"  {r['repo']:<40} {marks:<14} {r['description']}".rstrip())
+
+
 @project_app.command("list")
 def project_list() -> None:
     """List the projects with their defaults."""

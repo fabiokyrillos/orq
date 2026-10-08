@@ -474,3 +474,20 @@ def test_answer_by_claude(home: OrqPaths) -> None:
     assert result.exit_code == 0, result.output
     assert Store(home.db).get_decision("DCLAU").answered_by == "claude"
     assert CliRunner().invoke(app, ["answer", "DCLAU", "1", "--by", "robot"]).exit_code == 1
+
+
+def test_project_candidates_lists_local_folders_then_github(home: OrqPaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORQ_GH_CMD", f"{sys.executable} {FAKES / 'fake_gh.py'}")
+    monkeypatch.setenv("FAKE_GH_RECORD", str(tmp_path / "gh.jsonl"))
+    root = tmp_path / "GitHub"
+    folder = root / "Group" / "local-one"
+    folder.mkdir(parents=True)
+    git("init", "-q", cwd=folder)
+    git("remote", "add", "origin", "https://github.com/owner/local-one.git", cwd=folder)
+    home.config.write_text(f"[projects]\nscan_roots = [{json.dumps(str(root))}]\n", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["project", "candidates"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.index("owner/local-one") < result.output.index("owner/only-remote")
+    assert str(folder) in result.output and "private" in result.output

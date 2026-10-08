@@ -111,6 +111,14 @@ class QueueConfig:
 
 
 @dataclass
+class ProjectsConfig:
+    """Where the Add project page looks for the owner's checkouts (Phase 7). orq only reads those folders."""
+
+    scan_roots: list[str] = field(default_factory=list)
+    scan_depth: int = 3                    # folder levels below each root
+
+
+@dataclass
 class Config:
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     implementer: ImplementerConfig = field(default_factory=ImplementerConfig)
@@ -121,6 +129,7 @@ class Config:
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     queue: QueueConfig = field(default_factory=QueueConfig)
+    projects: ProjectsConfig = field(default_factory=ProjectsConfig)
 
 
 def load_config(path: Path) -> Config:

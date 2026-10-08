@@ -21,7 +21,11 @@ created = any(call[:2] == ["pr", "create"] for call in history[:-1])
 merged = any(call[:2] == ["pr", "merge"] for call in history[:-1])
 checks_polls = sum(1 for call in history[:-1] if call[:2] == ["pr", "checks"])
 
-if args[:2] == ["repo", "view"]:
+if args[:1] == ["api"] and "user/repos" in " ".join(args):
+    for item in ({"full_name": "owner/local-one", "private": False, "description": "", "pushed_at": "2026-10-01T00:00:00Z", "archived": False},
+                 {"full_name": "owner/only-remote", "private": True, "description": "not cloned", "pushed_at": "2026-09-01T00:00:00Z", "archived": False}):
+        print(json.dumps(item))
+elif args[:2] == ["repo", "view"]:
     if os.environ.get("FAKE_GH_REPO_MISSING"):
         sys.stderr.write("GraphQL: Could not resolve to a Repository\n")
         sys.exit(1)

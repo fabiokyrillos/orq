@@ -17,13 +17,15 @@ from orq.config import Config
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_KEYS = ("implementer.default_model", "implementer.mechanical_model", "reviewer.codex_model", "reviewer.claude_model")
 EFFORT_KEYS = ("reviewer.routine_effort", "reviewer.final_effort")
-LIST_KEYS = ("git.protected_paths", "guard.source_globs")
-INT_KEYS = ("guard.max_net_deleted_lines", "notify.auto_answer_minutes")
+LIST_KEYS = ("git.protected_paths", "guard.source_globs", "projects.scan_roots")
+INT_KEYS = ("guard.max_net_deleted_lines", "notify.auto_answer_minutes", "projects.scan_depth")
 BOOL_KEYS = ("notify.auto_answer",)
 STAKES_KEYS = ("notify.auto_answer_max_stakes",)
 STAKES = ("low", "medium", "high")
 KEYS = MODEL_KEYS + EFFORT_KEYS + LIST_KEYS + INT_KEYS + BOOL_KEYS + STAKES_KEYS
 LIVE_KEYS = MODEL_KEYS + EFFORT_KEYS
+# Phase 7: settings of the whole install, never of one project.
+GLOBAL_ONLY_KEYS = ("projects.scan_roots", "projects.scan_depth")
 # Short names for the optional `## Models` section of TASK.md (models and efforts only).
 TASK_ALIASES = {"implementer": "implementer.default_model", "mechanical": "implementer.mechanical_model",
                 "reviewer": "reviewer.codex_model", "claude_reviewer": "reviewer.claude_model",
@@ -96,12 +98,14 @@ def codex_models(cache_path: Path | None = None) -> list[dict]:
 
 
 def validate_overrides(overrides: Mapping[str, Any], *, cache_path: Path | None = None,
-                       codex_model: str | None = None) -> dict[str, Any]:
+                       codex_model: str | None = None, layer: str = "global") -> dict[str, Any]:
     """Check keys, types and efforts; None clears a key. `codex_model` is the model the efforts will run on."""
     clean: dict[str, Any] = {}
     for key, value in overrides.items():
         if key not in KEYS:
             raise SettingsError(f"unknown setting {key}")
+        if layer != "global" and key in GLOBAL_ONLY_KEYS:
+            raise SettingsError(f"{key} is a global setting")
         if value is None:
             clean[key] = None
         elif key in BOOL_KEYS:

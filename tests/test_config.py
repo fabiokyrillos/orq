@@ -85,3 +85,11 @@ def test_queue_section(tmp_path: Path) -> None:
     config = load_config(path)
     assert config.queue.poll_seconds == 2 and config.queue.project_concurrency == 1
     assert Config().queue.poll_seconds == 5
+
+
+def test_projects_section(tmp_path: Path) -> None:
+    assert (Config().projects.scan_roots, Config().projects.scan_depth) == ([], 3)
+    path = tmp_path / "config.toml"
+    path.write_text('[projects]\nscan_roots = ["D:/Projetos/GitHub"]\nscan_depth = 2\n', encoding="utf-8")
+    config = load_config(path)
+    assert (config.projects.scan_roots, config.projects.scan_depth) == (["D:/Projetos/GitHub"], 2)
