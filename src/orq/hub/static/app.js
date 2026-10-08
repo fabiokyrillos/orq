@@ -577,7 +577,7 @@ async function usageView(el, project) {
       ${project ? '' : `<div class="card"><h3 class="muted small">POR PROJETO</h3>${usageTable(u.by_project, 'project', 'por projeto', x => `<a href="${projectPath(x)}/usage">${esc(x)}</a>`)}</div>`}
       <div class="card"><h3 class="muted small">POR DIA</h3>${usageTable(u.by_day, 'day', 'por dia', x => new Date(x + 'T12:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', weekday: 'short' }))}</div>
       <div class="card"><h3 class="muted small">POR PAPEL</h3>${usageTable(u.by_role, 'role', 'por papel', x => esc(ROLE_LABELS[x] || x))}</div>
-      <div class="card"><h3 class="muted small">POR MODELO</h3>${usageTable(u.by_model, 'model', 'por modelo', x => `<span class="mono">${esc(x)}</span>`)}</div>
+      <div class="card"><h3 class="muted small">POR MODELO</h3>${usageTable(u.by_model, 'model', 'por modelo', x => x === '?' ? '<span class="muted">não registrado (runs antigos)</span>' : `<span class="mono">${esc(x)}</span>`)}</div>
     </div>
     <div class="card"><h3 class="muted small">RUNS QUE MAIS GASTARAM</h3>
       ${u.runs.length ? `<table><thead><tr><th>run</th><th>task</th>${project ? '' : '<th>projeto</th>'}<th>estado</th><th>chamadas</th><th>entrada</th><th>saída</th><th>compactações</th></tr></thead><tbody>

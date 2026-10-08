@@ -56,12 +56,16 @@ def _calls(paths: OrqPaths, store: Store) -> tuple[list[dict], dict[str, dict], 
         runs[run.run_id] = {"run_id": run.run_id, "project": run.repo, "title": run.task_title, "state": run.state.value,
                             "calls": 0, "input_tokens": 0, "output_tokens": 0,
                             "compactions": _compactions(list(run_dir.glob("iterations/*/implementer.stream.jsonl")))}
+        implementer_model = None  # before Phase 6 the role events had no model; implementer_model events did
         for event in read_events(run_dir):
+            if event.get("type") == "implementer_model":
+                implementer_model = event.get("model")
             if event.get("type") not in ROLES:
                 continue
             usage = event.get("usage") or {}
+            model = event.get("model") or (implementer_model if event["type"] == "implementer" else None) or "?"
             calls.append({"ts": event["ts"], "project": run.repo, "run_id": run.run_id, "role": event["type"],
-                          "model": event.get("model") or "?", "input_tokens": _input_tokens(usage),
+                          "model": model, "input_tokens": _input_tokens(usage),
                           "output_tokens": int(usage.get("output_tokens") or 0)})
             if isinstance(event.get("rate_limit"), dict):
                 limits.append({"ts": event["ts"], **event["rate_limit"]})

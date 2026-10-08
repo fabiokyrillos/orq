@@ -66,3 +66,14 @@ def test_usage_of_an_empty_install(tmp_path: Path) -> None:
     usage = collect(OrqPaths(tmp_path / "home"), Store(tmp_path / "orq.db"))
     assert usage["totals"] == {"calls": 0, "input_tokens": 0, "output_tokens": 0, "compactions": 0}
     assert usage["limits"] == {"codex": None, "claude": None}
+
+
+def test_old_runs_without_a_model_on_the_call_use_the_implementer_model_event(tmp_path: Path) -> None:
+    paths, store = OrqPaths(tmp_path / "home"), Store(tmp_path / "home" / "orq.db")
+    write_run(paths, store, "ROLD01", "owner/a", [  # before Phase 6 the role events had no model
+        {"ts": "2026-10-06T12:00:00+00:00", "type": "planner", "ok": True, "usage": {"input_tokens": 1}},
+        {"ts": "2026-10-06T12:01:00+00:00", "type": "implementer_model", "model": "sonnet"},
+        {"ts": "2026-10-06T12:02:00+00:00", "type": "implementer", "ok": True, "usage": {"input_tokens": 2}},
+    ])
+
+    assert {row["model"]: row["calls"] for row in collect(paths, store)["by_model"]} == {"?": 1, "sonnet": 1}
