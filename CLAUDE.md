@@ -17,6 +17,7 @@
 * Windows native. No bash only scripts, no tmux, no WSL assumptions. Use Python for scripts and hooks. Use `pathlib` for paths.
 * Everything in English: code, identifiers, comments, docs, commits.
   * Exception (owner's decision, 2026-10-08): texts the owner reads on WhatsApp are in Brazilian Portuguese. That covers the message templates, orq's own decision texts, and the agents' owner-facing fields (`context`, `question`, `option_details`, `recommendation_reason`, `owner_update`). Machine keywords stay as they are (`APPROVE`, `DENY`, `STATUS`, IDs, the `approve`/`deny`/`abort` options the loop parses).
+  * Extended in Phase 7.1 (owner's decision, 2026-10-08): every dashboard text (labels, buttons, hints, state names) and the chat agent's answers are in Brazilian Portuguese too. The CLI, the API's error texts, code, docs and commits stay English.
 * Never commit secrets. Config secrets come from environment variables.
 * Runtime data (logs, worktrees, DB) lives under `%USERPROFILE%\.orq\`, never in this repo.
 
