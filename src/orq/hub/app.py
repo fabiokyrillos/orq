@@ -27,8 +27,9 @@ from orq.core.answers import AnswerError, record_answer
 from orq.core.checkpoint import Checkpoint
 from orq.core.control import ControlError, abort_run, request_pause, spawn_resume
 from orq.core.models import Decision, Project, RunRecord, RunState
+from orq.core.discovery import candidates
 from orq.core.projects import ProjectError, add_project
-from orq.core.settings import EFFORTS, KEYS, LIVE_KEYS, TASK_ALIASES, SettingsError, codex_models, resolve, validate_overrides
+from orq.core.settings import EFFORTS, GLOBAL_ONLY_KEYS, KEYS, LIVE_KEYS, TASK_ALIASES, SettingsError, codex_models, resolve, validate_overrides
 from orq.core.queue import QueueError, enqueue
 from orq.core.digest import build_digest
 from orq.core.summary import build_replay, load_summary
@@ -174,13 +175,14 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
         data["effective"], data["sources"] = eff.values, eff.sources
         return data
 
-    def validated(overrides: dict, base: dict) -> dict:
+    def validated(overrides: dict, base: dict, layer: str = "global") -> dict:
         """Validate a change against the layer it lands in; efforts are checked on the model that will run them."""
         merged = {**base, **overrides}
         codex_model = merged.get("reviewer.codex_model") or resolve(config, store.get_settings(), {}, {})["reviewer.codex_model"]
         try:
-            validate_overrides(overrides, cache_path=models_cache, codex_model=codex_model)
-            clean = validate_overrides({k: v for k, v in merged.items() if v is not None}, cache_path=models_cache, codex_model=codex_model)
+            validate_overrides(overrides, cache_path=models_cache, codex_model=codex_model, layer=layer)
+            clean = validate_overrides({k: v for k, v in merged.items() if v is not None}, cache_path=models_cache,
+                                       codex_model=codex_model, layer=layer)
         except SettingsError as exc:
             raise HTTPException(400, str(exc))
         return {k: v for k, v in clean.items() if v is not None}
@@ -188,7 +190,7 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
     def settings_payload() -> dict:
         eff = resolve(config, store.get_settings(), {}, {})
         return {"overrides": store.get_settings(), "effective": eff.values, "sources": eff.sources, "keys": list(KEYS),
-                "live_keys": list(LIVE_KEYS), "efforts": list(EFFORTS), "codex_models": codex_models(models_cache),
+                "live_keys": list(LIVE_KEYS), "global_only_keys": list(GLOBAL_ONLY_KEYS), "efforts": list(EFFORTS), "codex_models": codex_models(models_cache),
                 "claude_models": ["opus", "sonnet", "haiku"], "task_aliases": TASK_ALIASES}
 
     @app.get("/api/settings")
@@ -222,6 +224,12 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
                 counts.setdefault(run.repo, Counter())[group] += 1
         return [project_dict(p, counts.get(p.repo)) for p in store.list_projects()]
 
+    @app.get("/api/projects/candidates")
+    async def project_candidates() -> dict:
+        """Phase 7: the owner's checkouts under projects.scan_roots, then GitHub repos not on this PC."""
+        eff = resolve(config, store.get_settings(), {}, {})
+        return await asyncio.to_thread(candidates, store, git, eff["projects.scan_roots"], eff["projects.scan_depth"])
+
     @app.post("/api/projects")
     async def create_project(body: ProjectBody) -> dict:
         try:
@@ -238,7 +246,7 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
             raise HTTPException(404, f"no project {slug}")
         changes = body.model_dump(exclude_unset=True)
         if "settings" in changes:
-            changes["settings"] = validated(changes["settings"] or {}, store.get_project(slug).settings)  # type: ignore[union-attr]
+            changes["settings"] = validated(changes["settings"] or {}, store.get_project(slug).settings, "project")  # type: ignore[union-attr]
         store.update_project(slug, **changes)
         return project_dict(store.get_project(slug))  # type: ignore[arg-type]
 

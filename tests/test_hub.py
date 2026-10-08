@@ -17,6 +17,7 @@ from orq.notify.whatsapp import InboundMessage
 from orq.paths import OrqPaths
 from orq.store.db import Store
 from orq.store.rundir import RunDir
+from tests.conftest import git
 
 
 class FakeClient:
@@ -86,6 +87,9 @@ def fake_git() -> GitManager:
             if args[2] == "owner/missing":
                 raise GitError("gh repo view failed (1): Could not resolve to a Repository")
             return json.dumps({"nameWithOwner": args[2], "defaultBranchRef": {"name": "main"}})
+        if args[:1] == ["api"]:
+            return json.dumps({"full_name": "owner/remote-only", "private": True, "description": "d", "pushed_at": "2026-10-01T00:00:00Z",
+                               "archived": False}) + "\n"
         raise AssertionError(args)
     return GitManager(gh=gh)
 
@@ -461,6 +465,30 @@ def test_project_settings_override_and_report_sources(home: OrqPaths, tmp_path: 
     again = c.patch("/api/projects/owner/sandbox", json={"settings": {"reviewer.codex_model": None}}).json()
     assert again["settings"] == {"git.protected_paths": ["db/**"]}
     assert c.patch("/api/projects/owner/sandbox", json={"settings": {"nope": 1}}).status_code == 400
+
+
+
+def test_project_candidates_use_the_global_scan_roots(home: OrqPaths, tmp_path: Path) -> None:
+    root = tmp_path / "GitHub"
+    folder = root / "Group" / "mine"
+    folder.mkdir(parents=True)
+    git("init", "-q", cwd=folder)
+    git("remote", "add", "origin", "https://github.com/owner/mine.git", cwd=folder)
+    c = client(home)
+
+    empty = c.get("/api/projects/candidates").json()
+    assert empty["roots"] == [] and empty["local"] == [] and [r["repo"] for r in empty["github"]] == ["owner/remote-only"]
+
+    assert c.put("/api/settings", json={"projects.scan_roots": [str(root)]}).status_code == 200
+    found = c.get("/api/projects/candidates").json()
+    assert [(r["repo"], r["path"]) for r in found["local"]] == [("owner/mine", str(folder))]
+    assert found["github"][0]["private"] is True
+
+
+def test_project_settings_refuse_global_only_keys(home: OrqPaths) -> None:
+    seed(home)
+    bad = client(home).patch("/api/projects/owner/sandbox", json={"settings": {"projects.scan_roots": ["D:/x"]}})
+    assert bad.status_code == 400 and "global" in bad.json()["error"]
 
 
 def test_model_test_endpoint_uses_the_probe(home: OrqPaths, tmp_path: Path) -> None:

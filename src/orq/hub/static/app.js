@@ -258,7 +258,7 @@ function settingsTab(el, p) {
     <label>Runs at once for this project</label><input id="s-max" type="number" min="1" value="${p.max_concurrent ?? ''}" placeholder="default ${p.effective_max_concurrent}">
     <div class="hint">Two runs on one repo at once often meet in a rebase conflict, which comes back to you as a decision.</div>
     <div style="margin-top:12px"><button class="primary" id="s-save">Save</button><span class="msg" id="s-msg"></span></div>
-    ${p.local_path ? `<div class="hint">Added from ${esc(p.local_path)}. orq works in its own clone, never in that folder.</div>` : ''}
+    ${p.local_path ? `<div class="hint">orq's clone is seeded from ${esc(p.local_path)}. orq only reads that folder and works in its own clone.</div>` : ''}
   </div>
   <div class="card" style="max-width:760px" id="ps"><h3 class="muted small">MODELS AND GUARD FOR THIS PROJECT</h3><div class="muted">loading…</div></div>`;
   api('/api/settings').then(payload => {
@@ -283,23 +283,52 @@ function settingsTab(el, p) {
   };
 }
 
-function addProjectPage() {
-  view.innerHTML = `<div class="head"><div><h1>Add project</h1><div class="muted small">A GitHub repo. orq clones it under ~/.orq/repos and never touches your own checkout.</div></div></div>
-    <div class="card" style="max-width:640px">
-      <label>GitHub repo or local folder</label><input id="p-source" placeholder="owner/repo  or  D:\\Projetos\\my-app">
-      <div class="hint">A folder is only used to read its origin remote.</div>
+async function addProjectPage() {
+  view.innerHTML = `<div class="head"><div><h1>Add project</h1><div class="muted small">Pick a repo you already have on this PC, or one that is only on GitHub. orq works in its own clone under ~/.orq/repos; a folder of yours is only read, to seed that clone.</div></div></div>
+    <div class="card" style="max-width:900px"><h3 class="muted small">DEFAULTS FOR THE PROJECT YOU ADD</h3>
       <label>Display name (optional)</label><input id="p-name">
       <label>Default check command (optional)</label><input id="p-check" placeholder="uv run pytest -q">
-      <div style="margin-top:12px"><button class="primary" id="p-add">Add</button><span class="msg" id="p-msg"></span></div>
-    </div>`;
-  $('#p-add').onclick = async () => {
-    $('#p-add').disabled = true; $('#p-msg').textContent = 'checking with gh…'; $('#p-msg').className = 'msg';
+      <span class="msg" id="p-msg"></span></div>
+    <div class="card" style="max-width:900px" id="p-local"><h3 class="muted small">ON THIS PC</h3><div class="muted">looking at your folders…</div></div>
+    <div class="card" style="max-width:900px" id="p-github"><h3 class="muted small">ONLY ON GITHUB</h3><div class="muted">asking gh…</div></div>
+    <div class="card" style="max-width:900px"><h3 class="muted small">OTHER</h3>
+      <label>GitHub repo or local folder</label><input id="p-source" placeholder="owner/repo  or  D:\\Projetos\\my-app">
+      <div style="margin-top:12px"><button class="primary" id="p-add">Add</button></div></div>`;
+  const add = async (source, button) => {
+    if (button) button.disabled = true;
+    $('#p-msg').textContent = 'checking with gh…';
+    $('#p-msg').className = 'msg';
     try {
-      const p = await post('/api/projects', { source: $('#p-source').value, name: $('#p-name').value || null, check_command: $('#p-check').value || null });
+      const p = await post('/api/projects', { source, name: $('#p-name').value || null, check_command: $('#p-check').value || null });
       location.hash = `${projectPath(p.repo)}/new`;
-    } catch (e) { $('#p-msg').textContent = e.message; $('#p-msg').className = 'msg err'; }
-    finally { $('#p-add').disabled = false; }
+    } catch (e) { $('#p-msg').textContent = e.message; $('#p-msg').className = 'msg err'; if (button) button.disabled = false; }
   };
+  $('#p-add').onclick = () => add($('#p-source').value.trim(), $('#p-add'));
+  const marks = r => `${r.private ? '<span class="chip" title="GitHub Actions spends your plan\'s minutes on private repos">private</span> ' : ''}${r.added ? '<span class="chip">added</span>' : ''}`;
+  let found;
+  try { found = await api('/api/projects/candidates'); }
+  catch (e) { $('#p-local').innerHTML = `<h3 class="muted small">ON THIS PC</h3><div class="msg err">${esc(e.message)}</div>`; $('#p-github').innerHTML = ''; return; }
+  $('#p-local').innerHTML = `<h3 class="muted small">ON THIS PC</h3>
+    ${!found.roots.length ? '<div class="hint">No folders to look in yet. Set "Folders with your repos" in <a href="#/settings">Settings</a>.</div>'
+      : !found.local.length ? `<div class="muted">No checkout with a GitHub origin under ${esc(found.roots.join(', '))}.</div>`
+      : `<table><thead><tr><th>repo</th><th>folder</th><th>your work there</th><th></th></tr></thead><tbody>${found.local.map((r, i) => `<tr>
+          <td>${esc(r.repo)} ${marks(r)}</td><td class="mono small">${esc(r.path)}</td>
+          <td class="small">${esc(r.branch || 'detached')}${r.dirty ? `, ${r.dirty} uncommitted` : ''}</td>
+          <td><button data-local="${i}" ${r.added ? 'title="updates the project: its folder becomes this one"' : ''}>${r.added ? 'Use this folder' : 'Add'}</button></td></tr>`).join('')}</tbody></table>
+        <div class="hint">orq never works in these folders: it reads one to seed its own clone, then fetches from GitHub. Your branch and uncommitted changes stay as they are.</div>`}`;
+  $$('[data-local]').forEach(b => b.onclick = () => add(found.local[Number(b.dataset.local)].path, b));
+  const github = found.github;
+  const rows = filter => github.map((r, i) => [r, i]).filter(([r]) => !filter || r.repo.toLowerCase().includes(filter) || r.description.toLowerCase().includes(filter))
+    .map(([r, i]) => `<tr><td>${esc(r.repo)} ${marks(r)}</td><td class="small muted">${esc(r.description)}</td><td class="small muted">${esc((r.pushed_at || '').slice(0, 10))}</td>
+      <td>${r.added ? '' : `<button data-github="${i}">Add</button>`}</td></tr>`).join('');
+  $('#p-github').innerHTML = `<h3 class="muted small">ONLY ON GITHUB</h3>
+    ${found.github_error ? `<div class="msg err">gh failed: ${esc(found.github_error)}</div>` : `
+      <input id="p-filter" placeholder="filter">
+      <table><thead><tr><th>repo</th><th>description</th><th>last push</th><th></th></tr></thead><tbody id="p-github-rows">${rows('')}</tbody></table>
+      <div class="hint">orq clones it under ~/.orq/repos at the first run; nothing is written in your folders.</div>`}`;
+  const bindGithub = () => $$('[data-github]').forEach(b => b.onclick = () => add(github[Number(b.dataset.github)].repo, b));
+  bindGithub();
+  if ($('#p-filter')) $('#p-filter').oninput = () => { $('#p-github-rows').innerHTML = rows($('#p-filter').value.trim().toLowerCase()); bindGithub(); };
 }
 
 // settings (Phase 6): one form for the global layer and for a project's layer
@@ -317,6 +346,8 @@ const SETTING_LABELS = {
   'notify.auto_answer': ['Automatic answers', 'when you do not answer, orq takes the recommendation of low-stakes questions (never business, destructive, guard or plan approval)'],
   'notify.auto_answer_minutes': ['Minutes before an automatic answer', 'counted from when WhatsApp got the question'],
   'notify.auto_answer_max_stakes': ['Highest stakes answered automatically', 'low is the safe choice'],
+  'projects.scan_roots': ['Folders with your repos', 'one folder per line; Add project lists the checkouts found there (orq only reads them)'],
+  'projects.scan_depth': ['Folder levels to look down', 'below each of those folders'],
 };
 const STAKES = ['low', 'medium', 'high'];
 
@@ -346,7 +377,7 @@ function settingInput(key, payload, layerValue, inherited) {
 }
 
 function settingsForm(payload, layer, effective, sources, layerName) {
-  const rows = payload.keys.filter(k => layerName === 'task' ? payload.live_keys.includes(k) : true).map(key => {
+  const rows = payload.keys.filter(k => layerName === 'task' ? payload.live_keys.includes(k) : layerName === 'project' ? !payload.global_only_keys.includes(k) : true).map(key => {
     const [label, hint] = SETTING_LABELS[key] || [key, ''];
     const src = sources[key];
     const test = key.endsWith('_model') ? `<button type="button" data-test="${key}">Test</button><span class="msg small" data-test-msg="${key}"></span>` : '';
