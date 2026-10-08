@@ -114,3 +114,93 @@ def test_update_project(tmp_path: Path) -> None:
 
     project = store.get_project("owner/repo")
     assert project is not None and (project.name, project.max_concurrent, project.check_command) == ("Repo", 2, "make test")
+
+
+# Phase 7.1: pin, archive, remove
+
+
+from orq.config import Config  # noqa: E402
+from orq.core.checkpoint import Checkpoint  # noqa: E402
+from orq.core.models import Project, RunState  # noqa: E402
+from orq.core.projects import archive_project, remove_project, restore_project, set_pinned  # noqa: E402
+from orq.paths import OrqPaths  # noqa: E402
+
+
+def finished_run(store: Store, paths: OrqPaths, run_id: str, repo: str, state: RunState, worktree: Path | None = None) -> None:
+    store.create_run(RunRecord(run_id=run_id, repo=repo, task_title="t", branch="b"))
+    store.set_state(run_id, state)
+    paths.run_dir(run_id).mkdir(parents=True, exist_ok=True)
+    Checkpoint(run_id=run_id, state=state.value, phase="done", branch="b", worktree=str(worktree or "")).save(
+        paths.run_dir(run_id) / "state.json")
+
+
+def test_status_and_pin_round_trip_and_survive_upsert(tmp_path: Path) -> None:
+    store = Store(tmp_path / "orq.db")
+    add_project(store, GitManager(gh=fake_gh([])), "owner/repo")
+    set_pinned(store, "owner/repo", True)
+    store.update_project("owner/repo", name="Renamed")
+
+    project = store.get_project("owner/repo")
+    assert (project.status, project.pinned, project.name) == ("active", True, "Renamed")
+    assert Store(tmp_path / "orq.db").get_project("owner/repo").pinned is True
+
+
+def test_archive_and_restore_refuse_while_a_run_is_live(tmp_path: Path) -> None:
+    store, paths = Store(tmp_path / "orq.db"), OrqPaths(tmp_path / "home")
+    add_project(store, GitManager(gh=fake_gh([])), "owner/repo")
+    store.create_run(RunRecord(run_id="RLIVE1", repo="owner/repo", task_title="t", branch="b"))  # QUEUED
+
+    with pytest.raises(ProjectError, match="RLIVE1"):
+        archive_project(store, "owner/repo")
+    store.set_state("RLIVE1", RunState.DONE)
+    archive_project(store, "owner/repo")
+    assert store.get_project("owner/repo").status == "archived"
+    restore_project(store, "owner/repo")
+    assert store.get_project("owner/repo").status == "active"
+
+
+def test_remove_deletes_orq_clone_and_run_worktrees_but_never_the_owner_folder(tmp_path: Path) -> None:
+    store, paths, config = Store(tmp_path / "orq.db"), OrqPaths(tmp_path / "home"), Config()
+    config.git.worktree_root = tmp_path / "wt"
+    owner_folder = tmp_path / "Projetos" / "repo"
+    (owner_folder / ".git").mkdir(parents=True)
+    clone = paths.repos / "owner" / "repo"
+    (clone / ".git" / "objects").mkdir(parents=True)
+    readonly = clone / ".git" / "objects" / "pack.idx"
+    readonly.write_text("x", encoding="utf-8")
+    readonly.chmod(0o444)  # git writes its packs read-only; removal must cope
+    paths.repos.joinpath("owner", "repo.orq.lock").write_text("", encoding="utf-8")
+    worktree = config.git.worktree_root / "repo" / "RDONE1"
+    worktree.mkdir(parents=True)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    store.upsert_project(Project(repo="owner/repo", name="repo", local_path=str(owner_folder)))
+    finished_run(store, paths, "RDONE1", "owner/repo", RunState.DONE, worktree)
+    finished_run(store, paths, "RODD01", "owner/repo", RunState.FAILED, outside)  # a path outside worktree_root stays
+
+    remove_project(store, paths, config, "owner/repo")
+
+    assert not clone.exists() and not paths.repos.joinpath("owner", "repo.orq.lock").exists()
+    assert not worktree.exists() and outside.exists() and (owner_folder / ".git").is_dir()
+    project = store.get_project("owner/repo")
+    assert (project.status, project.local_path) == ("removed", None)
+    assert store.get_run("RDONE1") is not None  # history stays
+
+
+def test_remove_refuses_while_a_run_waits_for_the_owner(tmp_path: Path) -> None:
+    store, paths = Store(tmp_path / "orq.db"), OrqPaths(tmp_path / "home")
+    add_project(store, GitManager(gh=fake_gh([])), "owner/repo")
+    finished_run(store, paths, "RWAIT1", "owner/repo", RunState.AWAITING_HUMAN)
+
+    with pytest.raises(ProjectError, match="RWAIT1"):
+        remove_project(store, paths, Config(), "owner/repo")
+    assert store.get_project("owner/repo").status == "active"
+
+
+def test_adding_a_removed_or_archived_project_makes_it_active_again(tmp_path: Path) -> None:
+    store = Store(tmp_path / "orq.db")
+    add_project(store, GitManager(gh=fake_gh([])), "owner/repo")
+    archive_project(store, "owner/repo")
+    assert add_project(store, GitManager(gh=fake_gh([])), "owner/repo").status == "active"
+    store.update_project("owner/repo", status="removed")
+    assert add_project(store, GitManager(gh=fake_gh([])), "owner/repo").status == "active"

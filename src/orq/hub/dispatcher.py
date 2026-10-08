@@ -21,6 +21,7 @@ from orq.core.control import ControlError, spawn_resume
 from orq.core.models import RunState
 from orq.core.procs import pid_alive
 from orq.paths import OrqPaths
+from orq.core.settings import slot_limits
 from orq.store.db import Store
 
 log = logging.getLogger("orq.hub.dispatcher")
@@ -45,11 +46,11 @@ class Dispatcher:
                 log.exception("dispatch failed")
             await self._sleep(self.config.queue.poll_seconds)
 
-    def _cap(self, repo: str) -> int:
+    def _cap(self, repo: str, default: int) -> int:
         project = self.store.get_project(repo)
         if project is not None and project.max_concurrent:
             return project.max_concurrent
-        return self.config.queue.project_concurrency
+        return default
 
     def _answered(self, cp: Checkpoint) -> bool:
         """A run parked at a decision whose process is gone (--no-prompt, crash, reboot) and whose answer has arrived."""
@@ -81,11 +82,12 @@ class Dispatcher:
                 continue  # still waiting for the owner, or paused on purpose
             queued.append((cp.phase == "setup", run))
         queued.sort(key=lambda item: item[0])  # runs that already started first; stable keeps the age order
+        global_limit, per_project = slot_limits(self.config, self.store)  # the dashboard may change them (Phase 7.1)
         spawned = []
         for _, run in queued:
-            if total >= self.config.limits.max_concurrent_runs:
+            if total >= global_limit:
                 break
-            if demand[run.repo] >= self._cap(run.repo):
+            if demand[run.repo] >= self._cap(run.repo, per_project):
                 continue
             try:
                 self._spawn(self.paths, run.run_id)

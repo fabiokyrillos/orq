@@ -204,3 +204,14 @@ def test_a_spawned_run_that_registered_and_released_its_slot_no_longer_counts(ho
     clock[0] += 5                                       # still inside the 60 s spawn grace
 
     assert dispatcher.tick() == [second]
+
+
+def test_dispatcher_reads_the_slot_settings_on_every_tick(home: OrqPaths) -> None:
+    store = Store(home.db)
+    runs = [enqueue(home, store, config(), TASK.format(repo=f"owner/r{i}")) for i in range(3)]
+    spawn = Spawner()
+    dispatcher = Dispatcher(store, home, config(global_limit=1), spawn=spawn, clock=lambda: 100.0, alive=lambda pid: False)
+
+    assert dispatcher.tick() == runs[:1]
+    store.set_settings({"limits.max_concurrent_runs": 3})  # changed in the dashboard (Phase 7.1)
+    assert dispatcher.tick() == runs[1:]

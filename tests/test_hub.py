@@ -638,3 +638,50 @@ def test_answer_endpoint_records_who_answered(home: OrqPaths) -> None:
     r = c.post("/api/decisions/DBBBB/answer", json={"answer": "1", "by": "claude"})
 
     assert r.status_code == 200 and r.json()["answered_by"] == "claude" and store.get_decision("DBBBB").answered_by == "claude"
+
+
+def test_project_pin_archive_restore_remove(home: OrqPaths) -> None:
+    seed(home, state=RunState.DONE)  # owner/sandbox, finished
+    c = client(home)
+    c.post("/api/projects", json={"source": "owner/a"})
+
+    assert c.post("/api/projects/owner/a/pin", json={"pinned": True}).json()["pinned"] is True
+    assert c.post("/api/projects/owner/a/archive").json()["status"] == "archived"
+    blocked = c.post("/api/tasks", json={"project": "owner/a", "fields": FIELDS})
+    assert blocked.status_code == 400 and "archived" in blocked.json()["error"]
+    assert c.post("/api/projects/owner/a/restore").json()["status"] == "active"
+
+    assert c.delete("/api/projects/owner/sandbox").status_code == 200
+    assert "owner/sandbox" not in [p["repo"] for p in c.get("/api/projects").json()]
+    assert "owner/sandbox" in [p["repo"] for p in c.get("/api/projects?all=1").json()]
+    assert c.get("/api/runs").json()[0]["run_id"] == "RAAAAA"  # history stays
+
+
+def test_project_with_a_waiting_run_cannot_be_archived_or_removed(home: OrqPaths) -> None:
+    seed(home)  # AWAITING_HUMAN
+    c = client(home)
+    assert c.post("/api/projects/owner/sandbox/archive").status_code == 400
+    bad = c.delete("/api/projects/owner/sandbox")
+    assert bad.status_code == 400 and "RAAAAA" in bad.json()["error"]
+
+
+def test_queue_and_projects_follow_the_slot_settings(home: OrqPaths) -> None:
+    seed(home)
+    c = client(home)
+    assert c.put("/api/settings", json={"limits.max_concurrent_runs": 3, "queue.project_concurrency": 2}).status_code == 200
+    assert c.get("/api/queue").json()["limit"] == 3
+    assert c.get("/api/projects").json()[0]["effective_max_concurrent"] == 2
+    assert c.put("/api/settings", json={"limits.max_concurrent_runs": 9}).status_code == 400
+
+
+def test_usage_endpoint_overall_and_per_project(home: OrqPaths) -> None:
+    seed(home)
+    events = home.run_dir("RAAAAA") / "events.jsonl"
+    with events.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"ts": "2026-10-08T12:00:00+00:00", "type": "reviewer", "ok": True, "model": "gpt-6.1-sol",
+                                 "usage": {"input_tokens": 100, "output_tokens": 10}}) + "\n")
+    c = client(home)
+
+    overall = c.get("/api/usage").json()
+    assert overall["totals"]["input_tokens"] == 100 and overall["by_project"][0]["project"] == "owner/sandbox"
+    assert c.get("/api/usage?project=owner/other").json()["totals"]["calls"] == 0

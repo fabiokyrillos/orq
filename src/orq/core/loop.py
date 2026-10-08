@@ -33,6 +33,7 @@ from orq.core.queue import QueueError, check_sandbox, create_run
 from orq.core.settings import Effective, resolve
 from orq.core.summary import write_summary
 from orq.core.ratelimit import claude_reset_time
+from orq.core.settings import slot_limits
 from orq.core.task import Task, parse_task
 from orq.git.manager import GitManager
 from orq.guard.diff_rules import evaluate_staged
@@ -265,17 +266,17 @@ class Runner:
             return
 
         def attempt() -> bool:
+            global_limit, per_project = slot_limits(self.config, self.store)  # dashboard settings (Phase 7.1)
             return self.store.try_acquire_slot(self.run_id, self.task.repo, os.getpid(), fresh=self.cp.phase == "setup",
-                                               global_limit=self.config.limits.max_concurrent_runs,
-                                               default_project_limit=self.config.queue.project_concurrency)
+                                               global_limit=global_limit, default_project_limit=per_project)
 
         if not attempt():
-            held = self.store.held_slots()
-            self.rundir.event("waiting_for_slot", held=held, limit=self.config.limits.max_concurrent_runs, phase=self.cp.phase)
+            held, limit = self.store.held_slots(), slot_limits(self.config, self.store)[0]
+            self.rundir.event("waiting_for_slot", held=held, limit=limit, phase=self.cp.phase)
             if self.cp.state != RunState.QUEUED.value:
                 self._transition(RunState.QUEUED, waiting="slot")
             self._save()
-            self.print(f"[{self.run_id}] waiting for a free slot ({held}/{self.config.limits.max_concurrent_runs} in use)")
+            self.print(f"[{self.run_id}] waiting for a free slot ({held}/{limit} in use)")
             while True:
                 if (self.rundir.path / PAUSE_FLAG).exists():
                     raise _Stop(RunState.PAUSED, "pause requested by the owner while waiting for a slot")

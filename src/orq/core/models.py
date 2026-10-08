@@ -66,6 +66,8 @@ class Project:
     local_path: str | None = None  # the owner's folder it was added from; seeds orq's clone, only read (Phase 7)
     created_at: str | None = None
     settings: dict = field(default_factory=dict)  # Phase 6 overrides (orq.core.settings keys)
+    status: str = "active"  # Phase 7.1: active | archived | removed
+    pinned: bool = False
 
 
 @dataclass

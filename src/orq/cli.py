@@ -23,6 +23,7 @@ from orq.core.control import ControlError, abort_run, request_pause
 from orq.core.loop import PAUSE_FLAG, ResumeError, Runner, SandboxError, implementer_system_prompt
 from orq.core.models import Decision, RunState
 from orq.core.procs import pid_alive
+from orq.core.settings import slot_limits
 from orq.core.task import TaskError, parse_task
 from orq.git.manager import GitError, GitManager
 from orq.notify.toast import show_toast
@@ -356,7 +357,7 @@ def project_list() -> None:
         typer.echo("no projects")
         return
     for p in projects:
-        cap = p.max_concurrent if p.max_concurrent is not None else config.queue.project_concurrency
+        cap = p.max_concurrent if p.max_concurrent is not None else slot_limits(config, Store(paths.db))[1]
         typer.echo(f"{p.repo:<40} {p.name:<24} base {p.base_branch:<10} max {cap}  check: {p.check_command or '-'}")
 
 
@@ -382,7 +383,7 @@ def status(run_id: str | None = typer.Argument(None)) -> None:
         if not runs:
             typer.echo("no runs")
             return
-        limit = load_config(paths.config).limits.max_concurrent_runs
+        limit = slot_limits(load_config(paths.config), store)[0]
         queued = sum(1 for r in runs if r.state is RunState.QUEUED)
         typer.echo(f"slots {store.held_slots()}/{limit} in use, {queued} queued")
         for item in runs:

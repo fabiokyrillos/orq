@@ -12,20 +12,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from typing import TYPE_CHECKING
+
 from orq.config import Config
+
+if TYPE_CHECKING:
+    from orq.store.db import Store
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_KEYS = ("implementer.default_model", "implementer.mechanical_model", "reviewer.codex_model", "reviewer.claude_model")
 EFFORT_KEYS = ("reviewer.routine_effort", "reviewer.final_effort")
 LIST_KEYS = ("git.protected_paths", "guard.source_globs", "projects.scan_roots")
-INT_KEYS = ("guard.max_net_deleted_lines", "notify.auto_answer_minutes", "projects.scan_depth")
+INT_KEYS = ("guard.max_net_deleted_lines", "notify.auto_answer_minutes", "projects.scan_depth", "limits.max_concurrent_runs",
+            "queue.project_concurrency")
+# Phase 7.1: bounded integers (inclusive).
+INT_RANGES = {"limits.max_concurrent_runs": (1, 6), "queue.project_concurrency": (1, 6)}
 BOOL_KEYS = ("notify.auto_answer",)
 STAKES_KEYS = ("notify.auto_answer_max_stakes",)
 STAKES = ("low", "medium", "high")
 KEYS = MODEL_KEYS + EFFORT_KEYS + LIST_KEYS + INT_KEYS + BOOL_KEYS + STAKES_KEYS
 LIVE_KEYS = MODEL_KEYS + EFFORT_KEYS
 # Phase 7: settings of the whole install, never of one project.
-GLOBAL_ONLY_KEYS = ("projects.scan_roots", "projects.scan_depth")
+GLOBAL_ONLY_KEYS = ("projects.scan_roots", "projects.scan_depth", "limits.max_concurrent_runs", "queue.project_concurrency")
 # Short names for the optional `## Models` section of TASK.md (models and efforts only).
 TASK_ALIASES = {"implementer": "implementer.default_model", "mechanical": "implementer.mechanical_model",
                 "reviewer": "reviewer.codex_model", "claude_reviewer": "reviewer.claude_model",
@@ -121,7 +129,11 @@ def validate_overrides(overrides: Mapping[str, Any], *, cache_path: Path | None 
                 raise SettingsError(f"{key} must be a list of strings")
             clean[key] = [v.strip() for v in value]
         elif key in INT_KEYS:
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise SettingsError(f"{key} must be a positive integer")
+            if key in INT_RANGES and not INT_RANGES[key][0] <= value <= INT_RANGES[key][1]:
+                raise SettingsError(f"{key} must be between {INT_RANGES[key][0]} and {INT_RANGES[key][1]}")
+            if value <= 0:
                 raise SettingsError(f"{key} must be a positive integer")
             clean[key] = value
         else:
@@ -137,3 +149,9 @@ def validate_overrides(overrides: Mapping[str, Any], *, cache_path: Path | None 
             if clean.get(key) and clean[key] not in known[model]:
                 raise SettingsError(f"{model} does not support {clean[key]} (supports {', '.join(known[model])})")
     return clean
+
+
+def slot_limits(config: Config, store: Store) -> tuple[int, int]:
+    """(global slots, default runs per project) after the dashboard's global overrides (Phase 7.1)."""
+    eff = resolve(config, store.get_settings(), {}, {})
+    return int(eff["limits.max_concurrent_runs"]), int(eff["queue.project_concurrency"])

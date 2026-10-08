@@ -123,3 +123,20 @@ def test_scan_roots_are_global_settings_only() -> None:
         validate_overrides({"projects.scan_roots": ["D:/x"]}, layer="project")
     with pytest.raises(SettingsError):
         validate_overrides({"projects.scan_depth": 0})
+
+
+def test_slot_limits_come_from_global_settings(tmp_path: Path) -> None:
+    from orq.core.settings import slot_limits
+    from orq.store.db import Store
+
+    store = Store(tmp_path / "orq.db")
+    config = Config()
+    assert slot_limits(config, store) == (2, 1)
+    store.set_settings({"limits.max_concurrent_runs": 3, "queue.project_concurrency": 2})
+    assert slot_limits(config, store) == (3, 2)
+
+    for bad in (0, 7):
+        with pytest.raises(SettingsError, match="1 and 6"):
+            validate_overrides({"limits.max_concurrent_runs": bad})
+    with pytest.raises(SettingsError, match="global"):
+        validate_overrides({"queue.project_concurrency": 2}, layer="project")

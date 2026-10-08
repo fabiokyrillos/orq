@@ -28,8 +28,9 @@ from orq.core.checkpoint import Checkpoint
 from orq.core.control import ControlError, abort_run, request_pause, spawn_resume
 from orq.core.models import Decision, Project, RunRecord, RunState
 from orq.core.discovery import candidates
-from orq.core.projects import ProjectError, add_project
-from orq.core.settings import EFFORTS, GLOBAL_ONLY_KEYS, KEYS, LIVE_KEYS, TASK_ALIASES, SettingsError, codex_models, resolve, validate_overrides
+from orq.core.usage import collect as collect_usage
+from orq.core.projects import ProjectError, add_project, archive_project, remove_project, restore_project, set_pinned
+from orq.core.settings import EFFORTS, GLOBAL_ONLY_KEYS, KEYS, slot_limits, LIVE_KEYS, TASK_ALIASES, SettingsError, codex_models, resolve, validate_overrides
 from orq.core.queue import QueueError, enqueue
 from orq.core.digest import build_digest
 from orq.core.summary import build_replay, load_summary
@@ -70,6 +71,10 @@ class ProjectBody(BaseModel):
     base_branch: str | None = None
     check_command: str | None = None
     max_concurrent: int | None = None
+
+
+class PinBody(BaseModel):
+    pinned: bool
 
 
 class ProjectPatch(BaseModel):
@@ -169,7 +174,7 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
 
     def project_dict(project: Project, counts: Counter | None = None) -> dict:
         data = asdict(project)
-        data["effective_max_concurrent"] = project.max_concurrent or config.queue.project_concurrency
+        data["effective_max_concurrent"] = project.max_concurrent or slot_limits(config, store)[1]
         data["counts"] = {group: (counts or Counter())[group] for group in STATE_GROUPS}
         eff = resolve(config, store.get_settings(), project.settings, {})
         data["effective"], data["sources"] = eff.values, eff.sources
@@ -216,13 +221,18 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
         return {"ok": ok, "message": message}
 
     @app.get("/api/projects")
-    async def projects() -> list[dict]:
+    async def projects(all: int = 0) -> list[dict]:  # noqa: A002 - query parameter name
         counts: dict[str, Counter] = {}
         for run in store.list_runs():
             group = next((g for g, members in STATE_GROUPS.items() if run.state in members), None)
             if group:
                 counts.setdefault(run.repo, Counter())[group] += 1
-        return [project_dict(p, counts.get(p.repo)) for p in store.list_projects()]
+        return [project_dict(p, counts.get(p.repo)) for p in store.list_projects() if all or p.status != "removed"]
+
+    @app.get("/api/usage")
+    async def usage(project: str | None = None) -> dict:
+        """Phase 7.1: tokens overall or for one project, plan limits, compactions."""
+        return await asyncio.to_thread(collect_usage, paths, store, project)
 
     @app.get("/api/projects/candidates")
     async def project_candidates() -> dict:
@@ -238,6 +248,31 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
         except ProjectError as exc:
             raise HTTPException(400, str(exc))
         return project_dict(project)
+
+    def project_action(action, *args) -> dict:
+        try:
+            action(*args)
+        except ProjectError as exc:
+            status = 404 if str(exc).startswith("no project") else 400
+            raise HTTPException(status, str(exc))
+        return project_dict(store.get_project(args[-1]))  # type: ignore[arg-type]
+
+    @app.post("/api/projects/{owner}/{repo}/pin")
+    async def pin_project(owner: str, repo: str, body: PinBody) -> dict:
+        return project_action(lambda s, r: set_pinned(s, r, body.pinned), store, f"{owner}/{repo}")
+
+    @app.post("/api/projects/{owner}/{repo}/archive")
+    async def archive(owner: str, repo: str) -> dict:
+        return project_action(archive_project, store, f"{owner}/{repo}")
+
+    @app.post("/api/projects/{owner}/{repo}/restore")
+    async def restore(owner: str, repo: str) -> dict:
+        return project_action(restore_project, store, f"{owner}/{repo}")
+
+    @app.delete("/api/projects/{owner}/{repo}")
+    async def remove(owner: str, repo: str) -> dict:
+        slug = f"{owner}/{repo}"
+        return await asyncio.to_thread(project_action, lambda s, r: remove_project(s, paths, config, r), store, slug)
 
     @app.patch("/api/projects/{owner}/{repo}")
     async def patch_project(owner: str, repo: str, body: ProjectPatch) -> dict:
@@ -291,6 +326,9 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
 
     @app.post("/api/tasks")
     async def create_task(body: TaskBody) -> dict:
+        project = store.get_project(body.project)
+        if project is not None and project.status != "active":
+            raise HTTPException(400, f"{body.project} is {project.status}; restore it first")
         text = task_text(body)
         errors = validate(body, text)
         if errors:
@@ -316,7 +354,7 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
     async def queue() -> dict:
         rows = store.slot_usage(alive=dispatcher._alive)
         queued = store.queued_runs()
-        return {"limit": config.limits.max_concurrent_runs, "held": sum(1 for r in rows if r["held"]),
+        return {"limit": slot_limits(config, store)[0], "held": sum(1 for r in rows if r["held"]),
                 "slots": rows, "queued": [run_summary(paths, store, r) for r in queued]}
 
     def queued_or_409(run_id: str) -> RunRecord:

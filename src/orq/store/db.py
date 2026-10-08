@@ -80,7 +80,7 @@ _REGISTER_PROJECTS = """
 INSERT OR IGNORE INTO projects (repo, name, created_at)
 SELECT repo, substr(repo, instr(repo, '/') + 1), min(created_at) FROM runs {where} GROUP BY repo
 """
-_PROJECT_FIELDS = ("name", "base_branch", "check_command", "max_concurrent", "local_path", "settings")
+_PROJECT_FIELDS = ("name", "base_branch", "check_command", "max_concurrent", "local_path", "settings", "status", "pinned")
 # Columns added after a table first shipped: (table, column, definition).
 _MIGRATIONS = (("projects", "settings", "TEXT NOT NULL DEFAULT '{}'"),
                ("decisions", "context", "TEXT NOT NULL DEFAULT ''"),
@@ -88,7 +88,9 @@ _MIGRATIONS = (("projects", "settings", "TEXT NOT NULL DEFAULT '{}'"),
                ("decisions", "recommendation_reason", "TEXT NOT NULL DEFAULT ''"),
                ("runs", "queue_order", "REAL NOT NULL DEFAULT 0"),
                ("decisions", "answered_by", "TEXT"),
-               ("decisions", "stakes", "TEXT NOT NULL DEFAULT ''"))
+               ("decisions", "stakes", "TEXT NOT NULL DEFAULT ''"),
+               ("projects", "status", "TEXT NOT NULL DEFAULT 'active'"),
+               ("projects", "pinned", "INTEGER NOT NULL DEFAULT 0"))
 
 
 def _now() -> str:
@@ -127,10 +129,10 @@ class Store:
 
     def upsert_project(self, project: Project) -> None:
         self._conn.execute(
-            "INSERT OR REPLACE INTO projects (repo, name, base_branch, check_command, max_concurrent, local_path, settings, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, coalesce((SELECT created_at FROM projects WHERE repo = ?), ?))",
+            "INSERT OR REPLACE INTO projects (repo, name, base_branch, check_command, max_concurrent, local_path, settings, status, "
+            "pinned, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, coalesce((SELECT created_at FROM projects WHERE repo = ?), ?))",
             (project.repo, project.name, project.base_branch, project.check_command, project.max_concurrent, project.local_path,
-             json.dumps(project.settings), project.repo, project.created_at or _now()),
+             json.dumps(project.settings), project.status, int(project.pinned), project.repo, project.created_at or _now()),
         )
         self._conn.commit()
 
@@ -150,6 +152,8 @@ class Store:
             return
         if "settings" in fields:
             fields["settings"] = json.dumps(fields["settings"] or {})
+        if "pinned" in fields:
+            fields["pinned"] = int(bool(fields["pinned"]))
         assignments = ", ".join(f"{name} = ?" for name in fields)
         self._conn.execute(f"UPDATE projects SET {assignments} WHERE repo = ?", (*fields.values(), repo))
         self._conn.commit()
@@ -360,6 +364,7 @@ def _run_from_row(row: sqlite3.Row) -> RunRecord:
 def _project_from_row(row: sqlite3.Row) -> Project:
     data = dict(row)
     data["settings"] = json.loads(data.get("settings") or "{}")
+    data["pinned"] = bool(data.get("pinned"))
     return Project(**data)
 
 
