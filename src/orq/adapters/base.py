@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from orq.core.procs import no_window
+
 # Variables injected by a parent Claude Code session; passing them on changes the child's behaviour.
 _SCRUB_PREFIXES = ("CLAUDE", "ANTHROPIC")
 
@@ -91,6 +93,7 @@ async def stream_process(
     proc = await asyncio.create_subprocess_exec(
         *argv, cwd=str(cwd), env=env,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        creationflags=no_window(),  # the hub (pythonw) has no console; claude stopped mid-answer without one (Phase 7.1)
     )
     assert proc.stdin and proc.stdout and proc.stderr
     if pid_file is not None:
