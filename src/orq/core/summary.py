@@ -74,9 +74,9 @@ def build_summary(run_dir: Path) -> dict:
             decisions[e["decision_id"]] = {
                 "decision_id": e["decision_id"], "source": e.get("source"), "decision_type": e.get("decision_type"),
                 "kind": e.get("kind"), "question": (str(e.get("question", "")).splitlines() or [""])[0][:200],
-                "answer": None, "via": None, "waited_seconds": None}
+                "answer": None, "via": None, "by": None, "waited_seconds": None}
         elif e["type"] == "answer" and e.get("decision_id") in decisions:
-            decisions[e["decision_id"]].update(answer=e.get("answer"), via=e.get("via"),
+            decisions[e["decision_id"]].update(answer=e.get("answer"), via=e.get("via"), by=e.get("by"),
                                                waited_seconds=_seconds(raised_at[e["decision_id"]], e))
 
     agents = {role: {"calls": 0, "failed": 0, "seconds": 0, "input_tokens": 0, "output_tokens": 0} for role in ROLES}

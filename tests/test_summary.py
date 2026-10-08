@@ -80,7 +80,7 @@ def test_summary_from_events(tmp_path: Path) -> None:
     assert s["milestones"] == {"planned": 2, "done": 2}
     assert s["pr"] == {"url": "https://github.com/owner/sandbox/pull/6", "merged": True}
     assert s["decisions"] == [{"decision_id": "DAAAA", "source": "reviewer", "decision_type": "blocked", "kind": "reviewer",
-                               "question": "Approve deletion?", "answer": "yes", "via": "whatsapp", "waited_seconds": 120}]
+                               "question": "Approve deletion?", "answer": "yes", "via": "whatsapp", "by": None, "waited_seconds": 120}]
     # Codex counts cached tokens inside input_tokens; Claude reports cache creation and reads apart from them.
     assert s["agents"]["planner"] == {"calls": 1, "failed": 0, "seconds": 30, "input_tokens": 1000, "output_tokens": 50}
     assert s["agents"]["implementer"] == {"calls": 2, "failed": 0, "seconds": 40, "input_tokens": 1005, "output_tokens": 120}

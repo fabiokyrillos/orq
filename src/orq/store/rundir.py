@@ -34,9 +34,12 @@ class RunDir:
         with (self.path / "events.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    def append_decision(self, decision_id: str, question: str, answer: str, context: str = "") -> None:
+    def append_decision(self, decision_id: str, question: str, answer: str, context: str = "", *, by: str = "",
+                        via: str = "") -> None:
         # Both agents read this file: the context carries the evidence (the flagged diff, the denied command).
-        block = f"## {decision_id}\n" + (f"**Context:** {context}\n" if context else "") + f"**Question:** {question}\n**Answer:** {answer}\n\n"
+        who = f" (by {by}, via {via})" if by and via else ""
+        block = (f"## {decision_id}\n" + (f"**Context:** {context}\n" if context else "") +
+                 f"**Question:** {question}\n**Answer{who}:** {answer}\n\n")
         with (self.path / "DECISIONS.md").open("a", encoding="utf-8") as handle:
             handle.write(block)
 

@@ -314,7 +314,11 @@ const SETTING_LABELS = {
   'git.protected_paths': ['Protected paths', 'one glob per line; the guard asks before any change there (applies when a run starts)'],
   'guard.max_net_deleted_lines': ['Max net deleted lines', 'per iteration, before the diff guard asks'],
   'guard.source_globs': ['Source files', 'one glob per line; what counts for the deleted-lines rule'],
+  'notify.auto_answer': ['Automatic answers', 'when you do not answer, orq takes the recommendation of low-stakes questions (never business, destructive, guard or plan approval)'],
+  'notify.auto_answer_minutes': ['Minutes before an automatic answer', 'counted from when WhatsApp got the question'],
+  'notify.auto_answer_max_stakes': ['Highest stakes answered automatically', 'low is the safe choice'],
 };
+const STAKES = ['low', 'medium', 'high'];
 
 function settingInput(key, payload, layerValue, inherited) {
   const id = `set-${key.replace(/\./g, '-')}`;
@@ -323,6 +327,13 @@ function settingInput(key, payload, layerValue, inherited) {
   if (key === 'reviewer.codex_model') {
     const opts = payload.codex_models.map(m => `<option value="${esc(m.slug)}" ${m.slug === shown ? 'selected' : ''}>${esc(m.display_name)} (${esc(m.slug)})</option>`).join('');
     return `<select id="${id}" data-key="${key}"><option value="">inherit: ${esc(ph)}</option>${opts}</select>`;
+  }
+  if (key === 'notify.auto_answer') {
+    const v = shown === '' ? '' : String(shown);
+    return `<select id="${id}" data-key="${key}" data-bool="1"><option value="">inherit: ${esc(ph ? 'on' : 'off')}</option><option value="true" ${v === 'true' ? 'selected' : ''}>on</option><option value="false" ${v === 'false' ? 'selected' : ''}>off</option></select>`;
+  }
+  if (key === 'notify.auto_answer_max_stakes') {
+    return `<select id="${id}" data-key="${key}"><option value="">inherit: ${esc(ph)}</option>${STAKES.map(s => `<option ${s === shown ? 'selected' : ''}>${s}</option>`).join('')}</select>`;
   }
   if (key.endsWith('_effort')) {
     return `<select id="${id}" data-key="${key}"><option value="">inherit: ${esc(ph)}</option>${payload.efforts.map(e => `<option ${e === shown ? 'selected' : ''}>${e}</option>`).join('')}</select>`;
@@ -341,7 +352,7 @@ function settingsForm(payload, layer, effective, sources, layerName) {
     const test = key.endsWith('_model') ? `<button type="button" data-test="${key}">Test</button><span class="msg small" data-test-msg="${key}"></span>` : '';
     return `<div class="setting"><label>${esc(label)} <span class="chip">${esc(src === layerName ? 'set here' : 'from ' + src)}</span></label>
       <div style="display:flex;gap:6px;align-items:flex-start">${settingInput(key, payload, layer[key], effective[key])}${test}</div>
-      <div class="hint">${esc(hint)} · now: <span class="mono">${esc(Array.isArray(effective[key]) ? effective[key].join(', ') : effective[key])}</span></div></div>`;
+      <div class="hint">${esc(hint)} · now: <span class="mono">${esc(Array.isArray(effective[key]) ? effective[key].join(', ') : typeof effective[key] === 'boolean' ? (effective[key] ? 'on' : 'off') : effective[key])}</span></div></div>`;
   }).join('');
   return `<datalist id="claude-models">${payload.claude_models.map(m => `<option value="${m}">`).join('')}</datalist>${rows}`;
 }
@@ -351,6 +362,7 @@ function readSettings(el) {
   $$('[data-key]', el).forEach(input => {
     const v = input.value.trim();
     if (!v) out[input.dataset.key] = null;
+    else if (input.dataset.bool) out[input.dataset.key] = v === 'true';
     else if (input.dataset.list) out[input.dataset.key] = lines(v);
     else if (input.dataset.int) out[input.dataset.key] = Number(v);
     else out[input.dataset.key] = v;
@@ -478,9 +490,9 @@ async function summaryTab(el, id) {
       </div>
     </div>
     <div class="card"><h3 class="muted small">DECISIONS</h3>
-      ${s.decisions.length ? `<table><thead><tr><th>id</th><th>from</th><th>question</th><th>answer</th><th>via</th><th>waited</th></tr></thead><tbody>
+      ${s.decisions.length ? `<table><thead><tr><th>id</th><th>from</th><th>question</th><th>answer</th><th>answered by</th><th>waited</th></tr></thead><tbody>
         ${s.decisions.map(x => `<tr><td class="mono">${x.decision_id}</td><td class="muted">${esc(x.source)}</td><td>${esc(x.question)}</td>
-        <td>${esc(x.answer ?? 'pending')}</td><td class="muted">${esc(x.via ?? '')}</td><td class="mono">${dur(x.waited_seconds)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">None. The run needed no input from you.</div>'}
+        <td>${esc(x.answer ?? 'pending')}</td><td class="muted">${esc({ owner: 'you', claude: 'Claude', auto: 'orq (automatic)' }[x.by] ?? x.by ?? '')}${x.via ? ' · ' + esc(x.via) : ''}</td><td class="mono">${dur(x.waited_seconds)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">None. The run needed no input from you.</div>'}
     </div>
     <div class="card"><h3 class="muted small">FILES CHANGED</h3><div class="mono small">${s.files_changed.map(esc).join('<br>') || '<span class="muted">none</span>'}</div></div>`;
 }
@@ -531,7 +543,7 @@ async function replayTab(el, id) {
 
 async function answer(runId, decisionId, text) {
   if (!text) return;
-  try { await post(`/api/decisions/${decisionId}/answer`, { answer: text }); $('#msg').textContent = `${decisionId} answered: ${text}`; }
+  try { await post(`/api/decisions/${decisionId}/answer`, { answer: text, by: 'owner' }); $('#msg').textContent = `${decisionId} answered: ${text}`; }
   catch (e) { $('#msg').textContent = e.message; $('#msg').className = 'msg err'; }
   setTimeout(route, 500);
 }

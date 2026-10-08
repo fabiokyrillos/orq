@@ -87,3 +87,6 @@ class Decision:
     context: str = ""  # what the run was doing and why it stopped
     option_details: list[str] = field(default_factory=list)  # one consequence per option, same order
     recommendation_reason: str = ""
+    # Phase 6.1: who answered (owner | claude | auto) and how much is at stake (low | medium | high, empty if unknown).
+    answered_by: str | None = None
+    stakes: str = ""

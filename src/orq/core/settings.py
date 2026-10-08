@@ -18,8 +18,11 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_KEYS = ("implementer.default_model", "implementer.mechanical_model", "reviewer.codex_model", "reviewer.claude_model")
 EFFORT_KEYS = ("reviewer.routine_effort", "reviewer.final_effort")
 LIST_KEYS = ("git.protected_paths", "guard.source_globs")
-INT_KEYS = ("guard.max_net_deleted_lines",)
-KEYS = MODEL_KEYS + EFFORT_KEYS + LIST_KEYS + INT_KEYS
+INT_KEYS = ("guard.max_net_deleted_lines", "notify.auto_answer_minutes")
+BOOL_KEYS = ("notify.auto_answer",)
+STAKES_KEYS = ("notify.auto_answer_max_stakes",)
+STAKES = ("low", "medium", "high")
+KEYS = MODEL_KEYS + EFFORT_KEYS + LIST_KEYS + INT_KEYS + BOOL_KEYS + STAKES_KEYS
 LIVE_KEYS = MODEL_KEYS + EFFORT_KEYS
 # Short names for the optional `## Models` section of TASK.md (models and efforts only).
 TASK_ALIASES = {"implementer": "implementer.default_model", "mechanical": "implementer.mechanical_model",
@@ -63,7 +66,7 @@ def resolve(config: Config, global_overrides: Mapping[str, Any], project_overrid
     sources: dict[str, str] = {}
     for key in KEYS:
         for name, layer in layers:
-            if layer.get(key) not in (None, ""):
+            if key in layer and layer[key] is not None and layer[key] != "":
                 values[key], sources[key] = layer[key], name
                 break
         else:
@@ -101,6 +104,14 @@ def validate_overrides(overrides: Mapping[str, Any], *, cache_path: Path | None 
             raise SettingsError(f"unknown setting {key}")
         if value is None:
             clean[key] = None
+        elif key in BOOL_KEYS:
+            if not isinstance(value, bool):
+                raise SettingsError(f"{key} must be true or false")
+            clean[key] = value
+        elif key in STAKES_KEYS:
+            if value not in STAKES:
+                raise SettingsError(f"{key} must be one of {', '.join(STAKES)}")
+            clean[key] = value
         elif key in LIST_KEYS:
             if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
                 raise SettingsError(f"{key} must be a list of strings")

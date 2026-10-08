@@ -462,3 +462,15 @@ def test_hub_autostart_failure_explains(home: OrqPaths, monkeypatch: pytest.Monk
     result = CliRunner().invoke(app, ["hub", "autostart", "on"])
 
     assert result.exit_code == 1 and "Access is denied" in result.output and "administrator" in result.output
+
+
+def test_answer_by_claude(home: OrqPaths) -> None:
+    store, _ = seeded_run(home)
+    store.add_decision(Decision(decision_id="DCLAU", run_id="RAAAAA", source="reviewer", decision_type="ambiguity", question="q?",
+                                options=["a", "b"]))
+
+    result = CliRunner().invoke(app, ["answer", "DCLAU", "0", "--by", "claude"])
+
+    assert result.exit_code == 0, result.output
+    assert Store(home.db).get_decision("DCLAU").answered_by == "claude"
+    assert CliRunner().invoke(app, ["answer", "DCLAU", "1", "--by", "robot"]).exit_code == 1

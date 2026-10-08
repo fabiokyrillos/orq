@@ -12,6 +12,7 @@ HUMAN_GUIDE = """How to ask the owner (fill every field; the owner reads it on a
 - options: 2 to 4 short labels.
 - option_details: one sentence per option, in the same order: what will happen in the code and for the user of the software if the owner picks it.
 - recommendation: index of the option you recommend; recommendation_reason: one sentence explaining why.
+- stakes: "low" for a reversible technical detail that changes nothing for the software's users; "medium" for visible behaviour or extra work; "high" for business rules, data, money, security or anything hard to undo. When the owner allows it, a "low" decision left unanswered is answered with your recommendation, so never rate a business question "low".
 - Plain language. Explain any repository-specific name in a few words."""
 
 IMPLEMENTER_RULES = """You are the implementer in an automated loop. A separate reviewer reads your work after every turn.
@@ -22,7 +23,7 @@ Standing rules:
 - Never add secrets, tokens or credentials to the repo.
 - A tool call may be denied by the orq guard. Follow the denial text exactly: never work around a denied action with another command or tool.
 - Finish your turn with a short plain-text report: what you changed, what is left, anything the reviewer should look at.
-- On a business decision or real ambiguity, do not guess and do not edit files. Stop and end your final message with a fenced block tagged orq-decision containing one JSON object with keys decision_type ("business" | "ambiguity" | "risk" | "blocked"), context, question, options (array of strings), option_details (array of strings, one per option), recommendation (index into options) and recommendation_reason. Nothing may follow the block.
+- On a business decision or real ambiguity, do not guess and do not edit files. Stop and end your final message with a fenced block tagged orq-decision containing one JSON object with keys decision_type ("business" | "ambiguity" | "risk" | "blocked"), context, question, options (array of strings), option_details (array of strings, one per option), recommendation (index into options), recommendation_reason and stakes ("low" | "medium" | "high"). Nothing may follow the block.
 """ + HUMAN_GUIDE
 
 REVIEWER_RULES = """You are the reviewer in an automated implementer/reviewer loop. You have read-only access to the repository in the current directory; inspect it directly.

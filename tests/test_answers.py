@@ -42,3 +42,20 @@ def test_record_answer_errors(env) -> None:
     record_answer(store, paths, "D1", "before", via="cli")
     with pytest.raises(AnswerError, match="already answered"):
         record_answer(store, paths, "D1", "after", via="cli")
+
+
+def test_record_answer_says_who_answered(env) -> None:
+    store, paths = env
+
+    answered = record_answer(store, paths, "D1", "0", via="dashboard", by="claude")
+
+    assert answered.answered_by == "claude" and Store(paths.db).get_decision("D1").answered_by == "claude"
+    assert "**Answer (by claude, via dashboard):** before" in (paths.run_dir("R1") / "DECISIONS.md").read_text(encoding="utf-8")
+    assert '"by": "claude"' in (paths.run_dir("R1") / "events.jsonl").read_text(encoding="utf-8")
+
+
+def test_owner_is_the_default_and_unknown_answerers_are_refused(env) -> None:
+    store, paths = env
+    with pytest.raises(AnswerError, match="who answered"):
+        record_answer(store, paths, "D1", "0", via="cli", by="someone")
+    assert record_answer(store, paths, "D1", "0", via="whatsapp").answered_by == "owner"

@@ -36,6 +36,7 @@ from orq.core.task import TaskError, parse_task
 from orq.core.taskfile import TaskFields, render_task
 from orq.adapters.probe import probe_model
 from orq.git.manager import GitManager
+from orq.hub.auto_answer import AutoAnswerer
 from orq.hub.dispatcher import Dispatcher
 from orq.hub.whatsapp_tasks import WhatsAppTasks
 from orq.notify.whatsapp import WhatsAppClient
@@ -59,6 +60,7 @@ STATE_GROUPS = {
 
 class AnswerBody(BaseModel):
     answer: str
+    by: str = "owner"  # the page answers for the owner; Claude passes "claude" when it answers during tests
 
 
 class ProjectBody(BaseModel):
@@ -127,6 +129,7 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
         handles = []
         if start_tasks:
             handles.append(asyncio.create_task(dispatcher.loop()))
+            handles.append(asyncio.create_task(AutoAnswerer(store, paths, config).loop()))
         if tasks is not None and start_tasks:
             handles += [asyncio.create_task(tasks.outbound_loop()), asyncio.create_task(tasks.inbound_loop())]
         try:
@@ -409,7 +412,9 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
     @app.post("/api/decisions/{decision_id}/answer")
     async def answer(decision_id: str, body: AnswerBody) -> dict:
         try:
-            decision = record_answer(store, paths, decision_id, body.answer, via="dashboard")
+            if body.by not in ("owner", "claude"):
+                raise AnswerError("by must be owner or claude")
+            decision = record_answer(store, paths, decision_id, body.answer, via="dashboard", by=body.by)
         except AnswerError as exc:
             raise HTTPException(400, str(exc))
         return decision_dict(decision)

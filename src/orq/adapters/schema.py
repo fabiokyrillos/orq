@@ -23,8 +23,11 @@ _HUMAN = {
         "option_details": {"type": "array", "items": {"type": "string"}},
         "recommendation": {"type": "integer"},
         "recommendation_reason": {"type": "string"},
+        # Phase 6.1: how much is at stake; only "low" can ever be answered automatically.
+        "stakes": {"type": "string", "enum": ["low", "medium", "high"]},
     },
-    "required": ["decision_type", "context", "question", "options", "option_details", "recommendation", "recommendation_reason"],
+    "required": ["decision_type", "context", "question", "options", "option_details", "recommendation", "recommendation_reason",
+                 "stakes"],
     "additionalProperties": False,
 }
 

@@ -186,6 +186,7 @@ def answer(
     text: str | None = typer.Argument(None, help="Free-text answer, or an option as written in `orq status`."),
     approve: bool = typer.Option(False, "--approve", help="Answer 'approve'."),
     deny: bool = typer.Option(False, "--deny", help="Answer 'deny'."),
+    by: str = typer.Option("owner", "--by", help="Who answers: owner, or claude when the coding assistant answers."),
 ) -> None:
     """Answer a pending decision. The run continues with `orq resume <run_id>`."""
     if sum([bool(text), approve, deny]) != 1:
@@ -194,7 +195,9 @@ def answer(
     paths = OrqPaths.from_env()
     value = "approve" if approve else "deny" if deny else str(text)
     try:
-        decision = record_answer(Store(paths.db), paths, decision_id, value, via="cli")
+        if by not in ("owner", "claude"):
+            raise AnswerError("--by must be owner or claude")
+        decision = record_answer(Store(paths.db), paths, decision_id, value, via="cli", by=by)
     except AnswerError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1)

@@ -598,3 +598,15 @@ def test_decisions_answered_before_the_hub_started_are_not_echoed(home: OrqPaths
     fake = FakeClient()
 
     assert tasks(home, store, fake).outbound_once() == 0 and fake.sent == []
+
+
+# Phase 6.1: who answered
+
+def test_answer_endpoint_records_who_answered(home: OrqPaths) -> None:
+    store = seed(home, decision=business())
+    c = client(home)
+
+    assert c.post("/api/decisions/DBBBB/answer", json={"answer": "1", "by": "nobody"}).status_code == 400
+    r = c.post("/api/decisions/DBBBB/answer", json={"answer": "1", "by": "claude"})
+
+    assert r.status_code == 200 and r.json()["answered_by"] == "claude" and store.get_decision("DBBBB").answered_by == "claude"

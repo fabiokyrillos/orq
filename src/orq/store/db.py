@@ -86,7 +86,9 @@ _MIGRATIONS = (("projects", "settings", "TEXT NOT NULL DEFAULT '{}'"),
                ("decisions", "context", "TEXT NOT NULL DEFAULT ''"),
                ("decisions", "option_details", "TEXT NOT NULL DEFAULT '[]'"),
                ("decisions", "recommendation_reason", "TEXT NOT NULL DEFAULT ''"),
-               ("runs", "queue_order", "REAL NOT NULL DEFAULT 0"))
+               ("runs", "queue_order", "REAL NOT NULL DEFAULT 0"),
+               ("decisions", "answered_by", "TEXT"),
+               ("decisions", "stakes", "TEXT NOT NULL DEFAULT ''"))
 
 
 def _now() -> str:
@@ -284,12 +286,12 @@ class Store:
     def add_decision(self, decision: Decision) -> None:
         self._conn.execute(
             "INSERT INTO decisions (decision_id, run_id, source, decision_type, question, options, recommendation, destructive, "
-            "status, answer, answered_via, created_at, answered_at, context, option_details, recommendation_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "status, answer, answered_via, created_at, answered_at, context, option_details, recommendation_reason, answered_by, stakes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (decision.decision_id, decision.run_id, decision.source, decision.decision_type, decision.question,
              json.dumps(decision.options), decision.recommendation, int(decision.destructive), decision.status,
              decision.answer, decision.answered_via, _now(), decision.answered_at, decision.context,
-             json.dumps(decision.option_details), decision.recommendation_reason),
+             json.dumps(decision.option_details), decision.recommendation_reason, decision.answered_by, decision.stakes),
         )
         self._conn.commit()
 
@@ -341,10 +343,10 @@ class Store:
         self._conn.execute("UPDATE decisions SET status = 'expired' WHERE run_id = ? AND status = 'pending'", (run_id,))
         self._conn.commit()
 
-    def answer_decision(self, decision_id: str, answer: str, answered_via: str) -> None:
+    def answer_decision(self, decision_id: str, answer: str, answered_via: str, answered_by: str = "owner") -> None:
         self._conn.execute(
-            "UPDATE decisions SET status = 'answered', answer = ?, answered_via = ?, answered_at = ? WHERE decision_id = ?",
-            (answer, answered_via, _now(), decision_id),
+            "UPDATE decisions SET status = 'answered', answer = ?, answered_via = ?, answered_by = ?, answered_at = ? WHERE decision_id = ?",
+            (answer, answered_via, answered_by, _now(), decision_id),
         )
         self._conn.commit()
 

@@ -91,6 +91,10 @@ class NotifyConfig:
     answer_poll_seconds: float = 3         # a waiting run re-reads SQLite this often
     reminder_hours: float = 3
     progress_minutes: float = 30           # digest of a working run this often, and when a milestone ends; 0 disables
+    # Phase 6.1: answer low-stakes decisions with the recommendation when the owner has not answered (off by default).
+    auto_answer: bool = False
+    auto_answer_minutes: int = 30
+    auto_answer_max_stakes: str = "low"    # low | medium | high
 
 
 @dataclass
