@@ -10,6 +10,7 @@ from pathlib import Path
 
 from orq.adapters.base import split_command
 from orq.core.locks import file_lock
+from orq.core.procs import no_window
 
 GhRunner = Callable[[list[str], Path], str]
 
@@ -26,7 +27,7 @@ def gh_argv() -> list[str]:
 
 
 def _run_gh(args: list[str], cwd: Path) -> str:
-    proc = subprocess.run([*gh_argv(), *args], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8")
+    proc = subprocess.run([*gh_argv(), *args], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", creationflags=no_window())
     if proc.returncode != 0:
         raise GitError(f"gh {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
     return proc.stdout
@@ -43,7 +44,8 @@ class GitManager:
         return self._gh
 
     def git(self, *args: str, cwd: Path) -> str:
-        proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8")
+        proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+                              creationflags=no_window())
         if proc.returncode != 0:
             raise GitError(f"git {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
         return proc.stdout
@@ -152,7 +154,7 @@ class GitManager:
 
     def show_file(self, worktree: Path, ref: str, path: str) -> str | None:
         """The file's content at `ref`, or None when it does not exist there."""
-        proc = subprocess.run(["git", "show", f"{ref}:{path}"], cwd=str(worktree), capture_output=True, text=True,
+        proc = subprocess.run(["git", "show", f"{ref}:{path}"], cwd=str(worktree), capture_output=True, text=True, creationflags=no_window(),
                               encoding="utf-8", errors="replace")
         return proc.stdout if proc.returncode == 0 else None
 

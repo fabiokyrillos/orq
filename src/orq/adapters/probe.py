@@ -13,6 +13,7 @@ from collections.abc import Callable
 from orq.adapters.base import clean_env
 from orq.adapters.claude import ISOLATION_FLAGS, claude_argv
 from orq.adapters.codex import codex_argv
+from orq.core.procs import no_window
 
 PROMPT = "Reply with the single word OK."
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -67,7 +68,8 @@ def probe_model(kind: str, model: str, *, effort: str = "low", windows_sandbox: 
         raise ValueError(f"unknown model kind {kind}")
     with tempfile.TemporaryDirectory(prefix="orq-probe-") as cwd:
         try:
-            proc = run(argv, cwd=cwd, input=PROMPT, capture_output=True, text=True, encoding="utf-8", env=clean_env(), timeout=timeout)
+            proc = run(argv, cwd=cwd, input=PROMPT, capture_output=True, text=True, encoding="utf-8", env=clean_env(), timeout=timeout,
+                       creationflags=no_window())
         except subprocess.TimeoutExpired:
             return False, f"no answer within {timeout:.0f} s"
         except FileNotFoundError as exc:

@@ -74,7 +74,9 @@ def spawn_resume(paths: OrqPaths, run_id: str) -> int:
     log = (paths.run_dir(run_id) / "resume.log").open("a", encoding="utf-8")
     flags = 0
     if sys.platform == "win32":
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+        # A hidden console of its own (not DETACHED_PROCESS): git, claude, codex and the checks inherit it instead of
+        # each opening a window (Phase 7).
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
     env = {**os.environ, "ORQ_HOME": str(paths.root), "PYTHONUTF8": "1"}
     proc = subprocess.Popen([sys.executable, "-m", "orq", "resume", run_id], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                             env=env, creationflags=flags, close_fds=True)
