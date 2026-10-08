@@ -129,3 +129,32 @@ class ClaudeReviewer:
                 return AgentResult(ok=False, text=result.text, session_id=result.session_id, usage=result.usage,
                                    error="; ".join(problems), error_kind="invalid_output", exit_code=result.exit_code)
         return result
+
+
+CHAT_SYSTEM_PROMPT = (
+    "You are talking with the owner of this repository inside orq. The working directory is a read-only checkout of the "
+    "project at the latest base branch. Answer the owner's questions about the code, its structure, behaviour and history "
+    "by reading the files: cite paths and line numbers, say when something is not in the code, and keep answers short "
+    "unless asked for detail. You cannot change files, run commands or start work; if the owner wants a change, suggest "
+    "how to phrase it as an orq task. Always answer in Brazilian Portuguese."
+)
+
+
+class ClaudeChat:
+    """Phase 7.1: the owner's conversation about a project. Read tools only; one session per conversation."""
+
+    name = "claude-chat"
+
+    def __init__(self, model: str = "opus", argv_prefix: list[str] | None = None) -> None:
+        self.model = model
+        self._prefix = argv_prefix
+
+    async def run(self, prompt: str, *, cwd: Path, log_path: Path, session_id: str | None = None, model: str | None = None,
+                  **_: object) -> AgentResult:
+        sid = session_id or str(uuid.uuid4())
+        session_flag = ["--resume", sid] if session_id else ["--session-id", sid]
+        argv = [*(self._prefix or claude_argv()), "-p", "--output-format", "stream-json", "--verbose", *ISOLATION_FLAGS,
+                "--model", model or self.model, "--tools", "Read,Grep,Glob", "--append-system-prompt", CHAT_SYSTEM_PROMPT,
+                *session_flag]
+        completed = await stream_process(argv, cwd=cwd, stdin_text=prompt, log_path=log_path, env=clean_env())
+        return _result_from(completed, sid)

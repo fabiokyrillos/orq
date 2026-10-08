@@ -27,6 +27,8 @@ from orq.core.answers import AnswerError, record_answer
 from orq.core.checkpoint import Checkpoint
 from orq.core.control import ControlError, abort_run, request_pause, spawn_resume
 from orq.core.models import Decision, Project, RunRecord, RunState
+from orq.adapters.claude import ClaudeChat
+from orq.core.chat import ChatError, ask, delete_chat, get_chat, list_chats
 from orq.core.discovery import candidates
 from orq.core.usage import collect as collect_usage
 from orq.core.projects import ProjectError, add_project, archive_project, remove_project, restore_project, set_pinned
@@ -71,6 +73,12 @@ class ProjectBody(BaseModel):
     base_branch: str | None = None
     check_command: str | None = None
     max_concurrent: int | None = None
+
+
+class ChatBody(BaseModel):
+    message: str
+    chat_id: str | None = None
+    model: str | None = None
 
 
 class PinBody(BaseModel):
@@ -119,9 +127,10 @@ class TaskBody(BaseModel):
 
 def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | None = None, start_tasks: bool = True,
                git: GitManager | None = None, allowed_hosts: set[str] | None = None, token: str | None = None,
-               models_cache: Path | None = None, probe=None) -> FastAPI:
+               models_cache: Path | None = None, probe=None, chat_agent=None, chat_clone_url: str | None = None) -> FastAPI:
     store = Store(paths.db)
     git = git or GitManager()
+    chat_agent = chat_agent or ClaudeChat()
     tasks = WhatsAppTasks(store, paths, config, whatsapp) if whatsapp is not None else None
     dispatcher = Dispatcher(store, paths, config)
     port = config.dashboard.port
@@ -233,6 +242,35 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
     async def usage(project: str | None = None) -> dict:
         """Phase 7.1: tokens overall or for one project, plan limits, compactions."""
         return await asyncio.to_thread(collect_usage, paths, store, project)
+
+    # chat (Phase 7.1): the owner's read-only conversations about a project
+
+    def chat_call(fn, *args):
+        try:
+            return fn(*args)
+        except ChatError as exc:
+            raise HTTPException(404 if str(exc).startswith(("no chat", "no project")) else 400, str(exc))
+
+    @app.get("/api/projects/{owner}/{repo}/chats")
+    async def chats(owner: str, repo: str) -> list[dict]:
+        return list_chats(paths, f"{owner}/{repo}")
+
+    @app.get("/api/projects/{owner}/{repo}/chats/{chat_id}")
+    async def chat(owner: str, repo: str, chat_id: str) -> dict:
+        return chat_call(get_chat, paths, f"{owner}/{repo}", chat_id)
+
+    @app.delete("/api/projects/{owner}/{repo}/chats/{chat_id}")
+    async def drop_chat(owner: str, repo: str, chat_id: str) -> dict:
+        chat_call(delete_chat, paths, f"{owner}/{repo}", chat_id)
+        return {"ok": True}
+
+    @app.post("/api/projects/{owner}/{repo}/chats")
+    async def send_chat(owner: str, repo: str, body: ChatBody) -> dict:
+        try:
+            return await ask(paths, config, store, git, chat_agent, f"{owner}/{repo}", body.message, chat_id=body.chat_id,
+                             model=body.model, clone_url=chat_clone_url)
+        except ChatError as exc:
+            raise HTTPException(404 if str(exc).startswith(("no chat", "no project")) else 400, str(exc))
 
     @app.get("/api/projects/candidates")
     async def project_candidates() -> dict:

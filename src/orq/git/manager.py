@@ -118,6 +118,18 @@ class GitManager:
         self.git("config", "core.longpaths", "true", cwd=worktree)
         self.git("config", "core.autocrlf", "false", cwd=worktree)
 
+    def detached_worktree_at_base(self, repo_path: Path, worktree: Path, base: str) -> None:
+        """Phase 7.1: a worktree with no branch at a fresh origin/<base> (the owner's chat reads it); kept at one path."""
+        with self._locked(repo_path):
+            self.git("fetch", "origin", base, cwd=repo_path)
+            if (worktree / ".git").exists():
+                self.git("checkout", "-q", "--detach", "-f", f"origin/{base}", cwd=worktree)
+                self.git("clean", "-fdq", cwd=worktree)
+                return
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+            self.git("worktree", "prune", cwd=repo_path)
+            self.git("worktree", "add", "-q", "--detach", str(worktree), f"origin/{base}", cwd=repo_path)
+
     def remove_worktree(self, repo_path: Path, worktree: Path, branch: str | None = None) -> None:
         with self._locked(repo_path):
             self.git("worktree", "remove", "--force", str(worktree), cwd=repo_path)

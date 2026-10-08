@@ -685,3 +685,26 @@ def test_usage_endpoint_overall_and_per_project(home: OrqPaths) -> None:
     overall = c.get("/api/usage").json()
     assert overall["totals"]["input_tokens"] == 100 and overall["by_project"][0]["project"] == "owner/sandbox"
     assert c.get("/api/usage?project=owner/other").json()["totals"]["calls"] == 0
+
+
+def test_chat_endpoints(home: OrqPaths, origin: Path) -> None:
+    from orq.adapters.base import AgentResult
+
+    class Agent:
+        async def run(self, prompt, *, cwd, log_path, session_id=None, model=None, **kwargs):
+            return AgentResult(ok=True, text=f"resposta para {prompt}", session_id="S1", usage={"input_tokens": 1, "output_tokens": 1})
+
+    seed(home)
+    app = create_app(home, Config(), start_tasks=False, git=fake_git(), allowed_hosts={"testserver"}, chat_agent=Agent(),
+                     chat_clone_url=str(origin))
+    c = TestClient(app, headers={"X-Orq-Token": app.state.token})
+
+    sent = c.post("/api/projects/owner/sandbox/chats", json={"message": "Oi"})
+    assert sent.status_code == 200 and sent.json()["answer"] == "resposta para Oi"
+    chat_id = sent.json()["chat_id"]
+    assert [m["role"] for m in c.get(f"/api/projects/owner/sandbox/chats/{chat_id}").json()["messages"]] == ["user", "assistant"]
+    assert c.get("/api/projects/owner/sandbox/chats").json()[0]["chat_id"] == chat_id
+    assert c.post("/api/projects/owner/sandbox/chats", json={"message": " "}).status_code == 400
+    assert c.post("/api/projects/owner/nope/chats", json={"message": "x"}).status_code == 404
+    assert c.delete(f"/api/projects/owner/sandbox/chats/{chat_id}").status_code == 200
+    assert c.get(f"/api/projects/owner/sandbox/chats/{chat_id}").status_code == 404

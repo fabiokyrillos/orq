@@ -32,6 +32,10 @@ class OrqPaths:
     def runs(self) -> Path:
         return self.root / "runs"
 
+    @property
+    def chats(self) -> Path:
+        return self.root / "chats"  # Phase 7.1: <owner>__<repo>/<chat_id>/
+
     def run_dir(self, run_id: str) -> Path:
         return self.runs / run_id
 

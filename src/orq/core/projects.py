@@ -141,6 +141,9 @@ def remove_project(store: Store, paths: OrqPaths, config: Config, repo: str) -> 
         if worktree and worktree.exists() and _inside(worktree, config.git.worktree_root):
             _rmtree(worktree)
     owner, name = repo.split("/", 1)
+    chat_checkout = config.git.worktree_root / name / "_chat"  # the conversations' checkout; their history stays
+    if chat_checkout.exists():
+        _rmtree(chat_checkout)
     clone = paths.repos / owner / name
     if clone.exists() and _inside(clone, paths.repos):
         _rmtree(clone)
