@@ -35,7 +35,7 @@ Automate the loop the owner runs by hand today:
 | Codex CLI | 0.161.0 (Phase 6; 0.139.0 before) |
 | Claude plan | Max 5x |
 | ChatGPT plan | Plus (tight limits, treat as scarce) |
-| Target repos | Public on GitHub (free Actions), created by the owner |
+| Target repos | On GitHub, created by the owner. Public or private (Phase 7); GitHub Actions on a private repo spends the plan's minutes (2,000 a month on Free) |
 | GitHub review | None. All gating happens inside orq before merge |
 | Messaging | Evolution API + n8n, both on a VPS |
 | Live view | Required |
@@ -328,7 +328,7 @@ Deleted files, removed tests, removed exported functions or routes, protected pa
 
 Implemented in Phase 2 (`src/orq/guard/diff_rules.py`), evaluated on the staged index right after the secret scan and before the check command. Rule ids: `deleted_file`, `removed_test`, `removed_export`, `removed_route`, `protected_path`, `dependency_removed` (manifest lines in `pyproject.toml`, `requirements*.txt`, `package.json`, `Cargo.toml`, `go.mod`), `negative_balance` (net deleted source lines above `[guard].max_net_deleted_lines`, default 300, over `[guard].source_globs`). The name-based rules are heuristics: a removed name that reappears anywhere in the added lines (rename, move) does not fire. One decision per iteration lists every violation; the approved list lands in `DECISIONS.md` so the reviewer sees it. On deny the iteration ends without a commit or a review.
 
-### 10.5 Secrets (repos are public)
+### 10.5 Secrets (repos are public or may become public)
 
 * `gitleaks` scan before every commit and every push. A hit blocks and raises a `risk` decision.
   * Before commit: `gitleaks git --pre-commit --staged --redact --no-banner --report-format json --report-path <file> <worktree>`.
@@ -339,6 +339,7 @@ Implemented in Phase 2 (`src/orq/guard/diff_rules.py`), evaluated on the staged 
 ### 10.6 Git strategy
 
 * One worktree per run, outside the repo: `<worktree_root>\<repo>\<run_id>`, default root `%USERPROFILE%\.orq\worktrees`. Phase 5: the clone lives at `repos\<owner>\<repo>` (older clones at `repos\<repo>` stay for the runs that reference them), and concurrent runs share it: git commands that write shared refs or the worktree list (clone, fetch, worktree add/remove, branch delete, push, `gh pr merge`) take a cross-process lock `<clone>.orq.lock`, which the OS releases when a process dies. Set `core.longpaths=true` in the repo config; without it, checkout fails past 260 characters.
+* Phase 7: when the project has a local folder (the owner's own checkout), a new clone is seeded from it: `git clone --reference <the folder's git dir> --dissociate <GitHub URL>`. Objects come from the folder, `--dissociate` copies them so the clone does not depend on the folder, and `origin` stays GitHub. A linked worktree seeds from its main repo; a folder that cannot seed (shallow, broken, gone) falls back to a plain clone. The run logs `repo_cloned` with `local:<git dir>` or `github`. orq never creates worktrees, branches, config, hooks or lock files in the owner's folder: `create_worktree` writes `core.autocrlf` and `core.longpaths` with `git config`, which would land in the shared repo config.
 * Worktree config also sets `core.autocrlf=false`; the owner's global `autocrlf=true` would otherwise rewrite line endings in public repos.
 * `core.longpaths` only fixes git. Python, PowerShell 5.1 (which Codex uses to read files) and other tools still fail past 260 characters unless Windows `LongPathsEnabled=1`. Prerequisite: the owner enables it, or sets a short `worktree_root` such as `C:\orq-wt`.
 * Branch `orq/<task-slug>`; if it already exists locally or on origin, `orq/<task-slug>-<run_id>`.
@@ -378,7 +379,7 @@ Never inside the repo (repos are public):
 %USERPROFILE%\.orq\
   orq.db                     # SQLite: runs, decisions, projects, slots, notifications
   config.toml                # global config (secrets via env vars)
-  repos\<owner>\<repo>\        # orq's own clone per project (never the owner's checkout)
+  repos\<owner>\<repo>\        # orq's own clone per project (never the owner's checkout; seeded from it, Phase 7)
   tasks\                     # the owner's TASK.md files (optional)
   worktrees\<repo>\<run_id>\
   runs\<run_id>\
@@ -485,6 +486,10 @@ port = 8765                               # 127.0.0.1 only
 [queue]
 poll_seconds = 5                          # hub dispatcher tick and a run's wait for a slot
 project_concurrency = 1                   # active runs per project unless the project sets its own
+
+[projects]
+scan_roots = []                           # Phase 7: folders with the owner's checkouts, e.g. ['D:\Projetos\GitHub']; global only
+scan_depth = 3                            # folder levels below each root
 ```
 
 ## 14. CLI surface
@@ -493,6 +498,7 @@ project_concurrency = 1                   # active runs per project unless the p
 orq run <TASK.md> [--no-prompt]
 orq queue <TASK.md>
 orq project add <owner/repo|folder> [--name] [--base] [--check] [--max-concurrent]
+orq project candidates
 orq project list
 orq status [<run_id>]
 orq answer <decision_id> "<text>" | <option index> | --approve | --deny
@@ -504,7 +510,9 @@ orq dashboard [--port <n>] [--log-file <path>]
 orq hub autostart on|off|status
 ```
 
-`orq queue` only queues; the hub starts the run when a slot is free (or `orq resume <run_id>` by hand). `orq status` shows slot usage and the queue length. A project added from a folder only reads that folder's `origin`; orq always works in its own clone.
+`orq queue` only queues; the hub starts the run when a slot is free (or `orq resume <run_id>` by hand). `orq status` shows slot usage and the queue length. A project added from a folder reads that folder's `origin` and seeds orq's clone from it (10.6); orq always works in its own clone. `orq project candidates` (and the dashboard's Add project page) lists the checkouts under `[projects].scan_roots` first, then the owner's and the owner's organizations' GitHub repos that are not on this PC (archived repos left out). Scanning only reads the folders: `git remote`, `git branch` and `git --no-optional-locks status`, one checkout at a time.
+
+`orq hub autostart on` registers a scheduled task that runs the hub under `pythonw` at logon. With no console, the hub starts console children (git, gh, taskkill, model probes) with `CREATE_NO_WINDOW`, and runs are spawned with a hidden console of their own (`CREATE_NO_WINDOW`, not `DETACHED_PROCESS`) that their children inherit, so no window flashes (Phase 7).
 
 `orq run` and `orq resume` wait for decisions to be answered from any channel (type in the terminal, use the dashboard, reply on WhatsApp, or `orq answer` elsewhere); `--no-prompt` exits at the decision instead. `orq dashboard` is the hub (section 5); WhatsApp works only while it runs.
 
@@ -611,6 +619,16 @@ Status: see `docs/phase6-findings.md`.
 * Formatted Portuguese WhatsApp messages (9.3).
 
 Status: complete on 2026-10-08 (see `docs/phase6-findings.md` section 7).
+
+### Phase 7: projects from the owner's local folders (owner's request before the first real project)
+
+* orq's clone is seeded from the owner's checkout (10.6), which orq only reads.
+* Adding a project lists the checkouts on this PC first and the GitHub repos that are not on the PC second (section 14).
+* Private repos are supported (section 3).
+
+**Exit criteria:** the picker lists the owner's repos, nested ones included, and no linked worktree; a sandbox added from an owner-style checkout (another branch, uncommitted changes) is cloned from that folder and merges a task, and the folder is identical before and after; a sandbox only on GitHub is cloned from GitHub and merges a task.
+
+Status: complete on 2026-10-08 (see `docs/phase7-findings.md`): run `R59GV9` cloned from the owner-style checkout and merged with the folder unchanged; run `RJ5DDN` cloned from GitHub and merged.
 
 ## 16. Non goals
 
