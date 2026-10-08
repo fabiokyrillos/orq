@@ -61,6 +61,7 @@ Automate the loop the owner runs by hand today:
 | Implementer | `claude` (Opus for hard steps, Sonnet for mechanical ones) | none | Full edit and exec inside the worktree, guarded by hooks |
 | Reviewer | `codex exec --sandbox read-only` (on `exec resume`: `-c sandbox_mode="read-only"`, there is no `--sandbox` flag) | `claude -p --model opus --tools "Read,Grep,Glob" --json-schema <schema>` | Read only |
 | Planner | Same agent as Reviewer, high reasoning effort | Same fallback | Read only |
+| Chat (Phase 7.1) | `claude -p --model opus --tools "Read,Grep,Glob"`, one session per conversation | none | Read only, in the project's chat checkout |
 
 The reviewer adapter must be swappable at runtime: when Codex hits its usage limit, switch to the Claude reviewer and switch back after the limit resets. All adapters share one interface.
 
@@ -381,6 +382,7 @@ Never inside the repo (repos are public):
   config.toml                # global config (secrets via env vars)
   repos\<owner>\<repo>\        # orq's own clone per project (never the owner's checkout; seeded from it, Phase 7)
   tasks\                     # the owner's TASK.md files (optional)
+  chats\<owner>__<repo>\<chat_id>\   # Phase 7.1: meta.json, messages.jsonl, claude.stream.jsonl
   worktrees\<repo>\<run_id>\
   runs\<run_id>\
     TASK.md
@@ -431,7 +433,7 @@ Never inside the repo (repos are public):
 [limits]
 max_iterations = 15
 max_wall_hours = 6
-max_concurrent_runs = 2      # global; runs waiting for the owner do not count
+max_concurrent_runs = 2      # global; runs waiting for the owner do not count; Phase 7.1: also a dashboard setting (1 to 6)
 rate_limit_retries = 3
 
 [implementer]
@@ -485,7 +487,7 @@ port = 8765                               # 127.0.0.1 only
 
 [queue]
 poll_seconds = 5                          # hub dispatcher tick and a run's wait for a slot
-project_concurrency = 1                   # active runs per project unless the project sets its own
+project_concurrency = 1                   # active runs per project unless the project sets its own; dashboard setting (1 to 6)
 
 [projects]
 scan_roots = []                           # Phase 7: folders with the owner's checkouts, e.g. ['D:\Projetos\GitHub']; global only
@@ -629,6 +631,17 @@ Status: complete on 2026-10-08 (see `docs/phase6-findings.md` section 7).
 **Exit criteria:** the picker lists the owner's repos, nested ones included, and no linked worktree; a sandbox added from an owner-style checkout (another branch, uncommitted changes) is cloned from that folder and merges a task, and the folder is identical before and after; a sandbox only on GitHub is cloned from GitHub and merges a task.
 
 Status: complete on 2026-10-08 (see `docs/phase7-findings.md`): run `R59GV9` cloned from the owner-style checkout and merged with the folder unchanged; run `RJ5DDN` cloned from GitHub and merged.
+
+### Phase 7.1: dashboard for daily use (owner's request after using the Phase 7 dashboard)
+
+* Projects can be pinned (first in the rail), archived (hidden, kept, restorable; no new tasks) and removed (orq's clone, the run worktrees and the chat checkout deleted; history kept; adding it again brings it back). Archive and remove are refused while a run of the project is unfinished.
+* `limits.max_concurrent_runs` and `queue.project_concurrency` are global dashboard settings, read by the dispatcher on every tick and by a run when it takes a slot.
+* Usage view, overall and per project: tokens by day, project, role and model (chat included), the latest Codex 5 h and weekly percentages and Claude rate-limit status, and Claude compactions (`system`/`compact_boundary` lines in the streams).
+* Chat: the owner talks with Claude about a project (table in section 4). Before each message the chat checkout `<worktree_root>/<repo>/_chat`, a detached worktree of orq's clone, moves to a fresh `origin/<base>`; the fixed path keeps the session resumable.
+* The dashboard is in Brazilian Portuguese (`CLAUDE.md` exception), the rail is fixed, settings are in sections, Add project adds several repos at once.
+* The hub runs under `pythonw`: agent processes it starts (the chat) get `CREATE_NO_WINDOW` too; without a console, claude stopped after its first tool call.
+
+Status: see `docs/phase7-findings.md` section 9.
 
 ## 16. Non goals
 

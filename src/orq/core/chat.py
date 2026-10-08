@@ -121,7 +121,9 @@ async def ask(paths: OrqPaths, config: Config, store: Store, git: GitManager, ag
         result = await agent.run(text, cwd=worktree, log_path=folder / "claude.stream.jsonl", session_id=meta.get("session_id"),
                                  model=use_model)
         if not result.ok:
-            error = result.error or "no answer"
+            error = (result.error or "").strip()
+            if not error or error.startswith("{"):  # the tail of the stream, not a message: the CLI just stopped
+                error = "claude stopped without an answer (see claude.stream.jsonl in the conversation's folder)"
             _append(folder, {"role": "error", "text": error, "kind": result.error_kind, "ts": _now()})
             raise ChatError(error)
         _append(folder, {"role": "assistant", "text": result.text, "ts": _now(), "model": use_model, "usage": result.usage,

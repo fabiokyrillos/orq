@@ -125,6 +125,68 @@ Passing the flag always was tried first. It gives every child a new hidden conso
 
 ## 8. Cleanup
 
-* The owner-style checkout `D:\Projetos\GitHub\orq-sandboxes` was created only for this test. It is kept until the owner says it can go.
-* The renamed clones `~/.orq/repos/fabiokyrillos/*.pre-phase7` are no longer used by any run. They are kept until the owner says they can go.
+* The owner-style checkout `D:\Projetos\GitHub\orq-sandboxes` and the renamed clones `~/.orq/repos/fabiokyrillos/*.pre-phase7` were deleted with the owner's OK, and sandbox B's project no longer points at the deleted folder.
 * While the runs went on, the owner added `fabiokyrillos/casa-amor-fluxo` from the picker.
+* The owner confirmed that opening Add project no longer flashes any window.
+
+## 9. Phase 7.1 (2026-10-08): dashboard for daily use
+
+Design: `docs/superpowers/specs/2026-10-08-phase7-1-dashboard-design.md`.
+
+### 9.1 Why
+
+After using the Phase 7 dashboard, the owner asked for:
+* pinning the most important project;
+* archiving and removing projects;
+* adding several repos at once;
+* token usage overall and per project, not only per run;
+* a way to talk with Opus about a project to understand it;
+* a fixed side rail and settings in sections;
+* the dashboard in Portuguese;
+* the slot count in the dashboard.
+
+### 9.2 What changed
+
+* **Projects:** `status` (`active`, `archived`, `removed`) and `pinned`. Archive and remove are refused while a run of the project is unfinished. Remove deletes orq's clone, the worktrees of the project's runs and the chat checkout, only under orq's own roots; the owner's folder is never touched; the run history stays. Adding a removed or archived project makes it active again.
+* **Slots:** `limits.max_concurrent_runs` and `queue.project_concurrency` (1 to 6) are global settings, read by the dispatcher on every tick and by a run when it takes a slot.
+* **Usage** (`core/usage.py`, `GET /api/usage`):
+  * tokens by day, project, role and model, chat included;
+  * the latest Codex 5 h and weekly percentages and Claude rate-limit status;
+  * compactions (`system`/`compact_boundary` lines in Claude's streams; the event name was confirmed in the CLI binary).
+  * Calls from before Phase 6 have no model on the role event; the implementer's model is taken from its `implementer_model` event, and the rest show as "não registrado".
+* **Chat** (`core/chat.py`, `ClaudeChat`):
+  * Claude with read tools only, one session per conversation;
+  * runs in a detached worktree of orq's clone at `<worktree_root>/<repo>/_chat`, moved to a fresh `origin/<base>` before every message;
+  * answers in Portuguese.
+* **Dashboard:**
+  * in Portuguese (state names included), with the `CLAUDE.md` exception extended;
+  * fixed rail, pinned projects first, archived projects in a collapsed group;
+  * settings in sections (Modelos, Guard, Respostas automáticas, Execução, Pastas);
+  * bulk add in Add project;
+  * Uso pages (overall and per project) and a Conversa tab.
+
+### 9.3 Real use on the owner's hub
+
+* **Chat.** The first message failed: claude stopped after its first tool call (a `Glob`), with no `result` event and nothing on stderr. The same call from a terminal answered. Cause: the hub runs under `pythonw` with no console, and the agent process got none either. `stream_process` now passes `CREATE_NO_WINDOW` when the process has no console, like the git and gh calls. After the fix:
+  * the question about the sandbox's modules and accents was answered in Portuguese, citing `slug.py:4-7` and `test_slug.py:13-17`;
+  * a follow-up ("the second example you gave…") was answered from the same session ("Dois — `acao-e-otima`").
+  * An error made of raw stream lines is now replaced by a short message.
+* **Slots.** Set to 3 in Configurações → Execução: the rail showed `0/3` and three slots. Cleared back to 2 (from `config.toml`).
+* **Pin, archive, restore.**
+  * The star put the Phase 0 sandbox first in the rail.
+  * Archiving sandbox B showed the banner and the "Arquivados (1)" group, and its Nova task tab refused new tasks. Restore brought it back.
+* **Remove and add again.**
+  * Removing sandbox B deleted `~/.orq/repos/fabiokyrillos/orq-phase5-sandbox-b`, its lock and its run worktrees, and took it off the rail.
+  * The first try to add it back found a bug: a removed project was still marked "adicionado" in Add project. Fixed with a test.
+  * Then it was added back with "Adicionar selecionados (1)".
+* **Fixed rail.** It stayed in place while the long New task page scrolled.
+* **Usage.** The overall page showed every run since Phase 1: about 9.1 M input and 89 k output tokens over 98 calls. It also showed Codex at 6% of the 5 h window and 15% of the week, and Claude "liberado".
+* **Run `R2NTVW`** (sandbox B after removal, "Add a sign helper"):
+  * `repo_cloned source=github`, so the clone was recreated;
+  * the planner call then failed with a transient OpenAI `503 Service Unavailable` ("Reconnecting... 2/5"), which became the low-stakes decision DNSTL (`retry`/`abort`, recommended `retry`) for the owner;
+  * result: RESULT_R2NTVW.
+
+### 9.4 Follow-ups noted
+
+* A transient Codex `503` costs the owner a decision. Candidate: retry it once by itself before asking, as orq already does for CI runner failures. Automatic answers (opt-in) would also take it, since it is `low`.
+* API error texts are still English in the Portuguese dashboard (D1 kept them English).

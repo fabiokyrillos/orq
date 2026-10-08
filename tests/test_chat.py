@@ -113,3 +113,12 @@ def test_chats_are_per_project_and_can_be_deleted(env, origin: Path) -> None:
         asyncio.run(ask(paths, config, store, GitManager(), FakeChatAgent([]), "owner/sandbox", "x", chat_id="CNOPE"))
     delete_chat(paths, "owner/sandbox", first["chat_id"])
     assert list_chats(paths, "owner/sandbox") == []
+
+
+def test_a_raw_stream_tail_is_not_shown_as_the_error(env, origin: Path) -> None:
+    paths, config, store = env
+    raw = '{"type":"rate_limit_event"}\n{"type":"assistant","message":{}}'
+    agent = FakeChatAgent([AgentResult(ok=False, error=raw, error_kind="error")])
+
+    with pytest.raises(ChatError, match="stopped without an answer"):
+        asyncio.run(ask(paths, config, store, GitManager(), agent, "owner/sandbox", "Oi", clone_url=str(origin)))
