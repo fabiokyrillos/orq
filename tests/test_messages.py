@@ -1,80 +1,94 @@
 from orq.core.models import Decision, RunRecord, RunState
-from orq.notify.messages import DESTRUCTIVE_HINT, HINT, format_decision, format_run_state, format_status, parse_reply
+from orq.notify.messages import (DESTRUCTIVE_HINT, HINT, MESSAGE_CAP, format_answered_elsewhere, format_decision, format_run_state,
+                                 format_status, parse_reply)
 
 
 def decision(**overrides) -> Decision:
     base = dict(decision_id="D7K2", run_id="RAB2CD", source="reviewer", decision_type="business",
-                question="Is the discount applied before or after tax?", options=["Before", "After"], recommendation=0)
+                question="O desconto entra antes ou depois do imposto?", options=["Antes", "Depois"], recommendation=0)
     base.update(overrides)
     return Decision(**base)
 
 
 def run(**overrides) -> RunRecord:
-    base = dict(run_id="RAB2CD", repo="owner/repo-x", task_title="Discounts", branch="orq/discounts", iteration=6)
+    base = dict(run_id="RAB2CD", repo="owner/repo-x", task_title="Descontos", branch="orq/discounts", iteration=6)
     base.update(overrides)
     return RunRecord(**base)
 
 
-def test_format_decision_without_details_keeps_the_short_shape() -> None:
-    text = format_decision(decision(), run())
-    assert text.splitlines() == [
-        "*[orq] D7K2 · repo-x · iteration 6*",
-        "Business decision (reviewer)",
-        "Question: Is the discount applied before or after tax?",
-        "1. Before (recommended)",
-        "2. After",
-        "Reply: D7K2 <number>  or  D7K2 <free text>",
+def test_decision_without_details_keeps_the_sections() -> None:
+    assert format_decision(decision(), run()).splitlines() == [
+        "🟡 *Decisão de negócio* · D7K2",
+        "📦 repo-x · iteração 6 · pergunta do revisor",
+        "",
+        "❓ *Pergunta*",
+        "O desconto entra antes ou depois do imposto?",
+        "",
+        "*Opções*",
+        "1️⃣ *Antes* ⭐",
+        "2️⃣ *Depois*",
+        "",
+        "↩️ Responda `D7K2 <número>` ou `D7K2 <texto>`",
     ]
 
 
-def test_format_decision_with_context_consequences_and_reason() -> None:
-    d = decision(context="Milestone 2 adds the invoice total. The task says 'apply the discount' but not when.",
-                 option_details=["total = (price - discount) * 1.1", "total = price * 1.1 - discount"],
-                 recommendation_reason="most invoices in the repo already discount the net price")
+def test_decision_with_context_consequences_reason_and_automatic_answer() -> None:
+    d = decision(decision_type="ambiguity", stakes="low",
+                 context="O milestone 2 calcula o total.\nA task não diz quando aplicar o desconto.",
+                 option_details=["total = (preço - desconto) * 1.1", "total = preço * 1.1 - desconto"],
+                 recommendation_reason="as notas do repo já descontam o preço líquido")
 
-    text = format_decision(d, run(), milestone="2/3")
+    lines = format_decision(d, run(), milestone="2/3", auto_minutes=30).splitlines()
 
-    assert text.splitlines() == [
-        "*[orq] D7K2 · repo-x · iteration 6 · milestone 2/3*",
-        "Business decision (reviewer)",
-        "Context: Milestone 2 adds the invoice total. The task says 'apply the discount' but not when.",
-        "Question: Is the discount applied before or after tax?",
-        "1. Before (recommended): total = (price - discount) * 1.1",
-        "2. After: total = price * 1.1 - discount",
-        "Recommended: 1, because most invoices in the repo already discount the net price",
-        "Reply: D7K2 <number>  or  D7K2 <free text>",
-    ]
+    assert lines[:8] == ["🔵 *Ambiguidade* · D7K2", "📦 repo-x · iteração 6 · milestone 2/3 · pergunta do revisor", "",
+                         "*Contexto*", "O milestone 2 calcula o total.", "A task não diz quando aplicar o desconto.", "", "❓ *Pergunta*"]
+    assert "1️⃣ *Antes* ⭐" in lines and "      ↳ total = (preço - desconto) * 1.1" in lines
+    assert "💡 *Recomendo a 1:* as notas do repo já descontam o preço líquido" in lines
+    assert "⚙️ Complexidade baixa · se você não responder, orq escolhe a recomendada em 30 min" in lines
 
 
 def test_long_context_is_cut_first_to_fit_the_cap() -> None:
-    d = decision(context="word " * 1000, option_details=["a", "b"], recommendation_reason="r")
+    text = format_decision(decision(context="palavra " * 1000, option_details=["a", "b"], recommendation_reason="r"), run())
 
-    text = format_decision(d, run())
-
-    assert len(text) <= 1500 and "(more in the dashboard)" in text
-    assert "Question: Is the discount" in text and text.endswith("Reply: D7K2 <number>  or  D7K2 <free text>")
+    assert len(text) <= MESSAGE_CAP and "(continua no dashboard)" in text
+    assert "O desconto entra antes" in text and text.endswith("↩️ Responda `D7K2 <número>` ou `D7K2 <texto>`")
 
 
-def test_answered_elsewhere_notice() -> None:
-    from orq.notify.messages import format_answered_elsewhere
-    d = decision(status="answered", answer="Before", answered_via="dashboard")
-    assert format_answered_elsewhere(d) == "[orq] D7K2 answered on the dashboard: Before. Nothing to do here."
-
-
-def test_format_destructive_decision_asks_for_approve_or_deny() -> None:
+def test_destructive_decision_asks_for_approve_or_deny() -> None:
     text = format_decision(decision(source="guard", decision_type="risk", destructive=True, options=["approve", "deny"], recommendation=1,
-                                    question="The implementer tried: rm -rf build. Allow it once?"), run())
-    assert text.endswith("Reply: APPROVE D7K2  or  DENY D7K2") and "Risk (guard)" in text
+                                    question="Permite esta ação uma vez: Bash: rm -rf build?"), run())
+    assert text.startswith("🔴 *Risco* · D7K2") and "pergunta do guard" in text
+    assert text.endswith("↩️ Responda `APPROVE D7K2` ou `DENY D7K2` (número não vale)")
 
 
-def test_format_run_state_and_status() -> None:
-    done = run(state=RunState.DONE)
-    assert format_run_state(done, pr_url="https://x/pull/4").splitlines() == ["*[orq] RAB2CD · repo-x · DONE*", "Discounts", "PR: https://x/pull/4"]
-    failed = run(state=RunState.FAILED)
-    assert "max iterations" in format_run_state(failed, reason="max iterations (3) reached")
-    status = format_status([run(state=RunState.AWAITING_HUMAN)], {"RAB2CD": [decision()]})
-    assert "RAB2CD AWAITING_HUMAN iter 6" in status and "pending D7K2" in status
-    assert format_status([], {}) == "*[orq] STATUS*\nno runs"
+def test_answered_elsewhere_says_who_answered() -> None:
+    owner = format_answered_elsewhere(decision(status="answered", answer="Antes", answered_via="dashboard", answered_by="owner"))
+    claude = format_answered_elsewhere(decision(status="answered", answer="Antes", answered_via="dashboard", answered_by="claude"))
+    auto = format_answered_elsewhere(decision(status="answered", answer="Antes", answered_via="auto", answered_by="auto"), minutes=31)
+
+    assert owner == "✅ *D7K2* respondida por você no dashboard\n➡️ Antes\n_Nada a fazer aqui._"
+    assert claude.startswith("🧑‍💻 *D7K2* respondida pelo Claude no dashboard")
+    assert auto.startswith("🤖 *D7K2* respondida automaticamente pelo orq (31 min sem resposta)")
+
+
+def test_run_states() -> None:
+    assert format_run_state(run(state=RunState.DONE), pr_url="https://x/pull/4").splitlines() == [
+        "✅ *Concluída* · RAB2CD · repo-x", "Descontos", "🔗 https://x/pull/4"]
+    failed = format_run_state(run(state=RunState.FAILED), reason="max iterations (3) reached")
+    assert failed.startswith("❌ *Falhou*") and failed.endswith("📝 Motivo: max iterations (3) reached")
+    assert format_run_state(run(state=RunState.ABORTED)).startswith("🛑 *Abortada*")
+
+
+def test_status_groups_by_project_and_shows_slots() -> None:
+    runs = [run(run_id="RA1", repo="owner/a", state=RunState.IMPLEMENTING), run(run_id="RB1", repo="owner/b", state=RunState.QUEUED),
+            run(run_id="RA2", repo="owner/a", state=RunState.DONE)]
+
+    lines = format_status(runs, {"RA1": [decision()]}, slots=(1, 2), queued=1).splitlines()
+
+    assert lines[0] == "📋 *Status* · vagas 1/2 · 1 na fila"
+    assert lines[1:4] == ["", "*a*", "🔨 RA1 IMPLEMENTING · iter 6 · Descontos"] and lines[4].startswith("      ⏳ D7K2: O desconto")
+    assert lines[5].startswith("✅ RA2 DONE") and lines[6:8] == ["", "*b*"] and lines[8].startswith("🕒 RB1 QUEUED")
+    assert format_status([], {}) == "📋 *Status*\nnenhuma run"
 
 
 def test_parse_answers() -> None:
@@ -104,15 +118,3 @@ def test_parse_unknown_shapes() -> None:
     assert parse_reply("D7K2").kind == "unknown" and parse_reply("D7K2").decision_id == "D7K2"
     assert parse_reply("APPROVE").kind == "unknown"
     assert "D7K2 1" in HINT and "APPROVE D7K2" in DESTRUCTIVE_HINT.format(id="D7K2")
-
-
-def test_status_groups_by_project_and_shows_slots() -> None:
-    runs = [run(run_id="RA1", repo="owner/a", state=RunState.IMPLEMENTING), run(run_id="RB1", repo="owner/b", state=RunState.QUEUED),
-            run(run_id="RA2", repo="owner/a", state=RunState.DONE)]
-
-    status = format_status(runs, {}, slots=(1, 2), queued=1)
-
-    lines = status.splitlines()
-    assert lines[0] == "*[orq] STATUS* · slots 1/2 · 1 queued"
-    assert lines[1] == "*a*" and lines[2].startswith("RA1 IMPLEMENTING") and lines[3].startswith("RA2 DONE")
-    assert lines[4] == "*b*" and lines[5].startswith("RB1 QUEUED")

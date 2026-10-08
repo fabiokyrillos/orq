@@ -369,7 +369,7 @@ class Runner:
         if self.task.plan_approval == "required":
             self._raise_decision("plan_approval", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="planner", decision_type="business",
-                question=f"Approve this plan ({len(milestones)} milestones), or answer with what to change?",
+                question=f"Aprova este plano ({len(milestones)} milestones) ou diz o que mudar?",
                 options=["approve", "revise"], recommendation=0, **decision_text.plan_approval(self.cp.plan)),
                 payload={}, state=RunState.AWAITING_PLAN_APPROVAL)
             return
@@ -438,7 +438,7 @@ class Runner:
             hits = ", ".join(f"{f.get('RuleID')} in {f.get('File')}:{f.get('StartLine')}" for f in scan.findings)
             self._raise_decision("secret", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="guard", decision_type="risk",
-                question=f"gitleaks found secrets: {hits}. Fix them in the worktree, then answer 'rescan', or answer 'abort'.",
+                question=f"O gitleaks achou segredos ({hits}). Corrija no worktree e responda 'rescan', ou responda 'abort'.",
                 options=["rescan", "abort"], recommendation=0, **decision_text.secret(scan.findings)), payload={})
             return
         if not self.cp.diff_approved:
@@ -451,7 +451,7 @@ class Runner:
                 self.rundir.event("diff_rules", iteration=it, violations=[str(v) for v in violations])
                 self._raise_decision("guard_diff", Decision(
                     decision_id=new_decision_id(), run_id=self.run_id, source="guard", decision_type="risk", destructive=True,
-                    question="Keep these changes flagged by the diff guard?", options=["approve", "deny"], recommendation=1,
+                    question="Mantém as mudanças apontadas pelo guard de diff?", options=["approve", "deny"], recommendation=1,
                     **decision_text.guard_diff(violations, self.git.staged_numstat(self.worktree), self.cp.report)),
                     payload={"listing": listing})
                 return
@@ -540,7 +540,7 @@ class Runner:
             target = f"rollback to iteration {rule.rollback_to}"
             self._raise_decision("progress", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
-                question=f"No progress ({rule.rule}): {rule.detail}. What now?", options=["continue", target, "abort"],
+                question=f"A run travou ({rule.rule}). O que fazer?", options=["continue", target, "abort"],
                 recommendation=1, **decision_text.no_progress(rule.rule, rule.detail, target, list(self.cp.summaries.values()))),
                 payload={"rollback_to": rule.rollback_to, "target": target})
             return
@@ -632,8 +632,8 @@ class Runner:
                 files, reason = failure
                 self._raise_decision("rebase_conflict", Decision(
                     decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
-                    question=f"Rebasing {self.cp.branch} onto origin/{self.task.base_branch} hit conflicts the implementer could not resolve. "
-                             f"Resolve by hand in {self.worktree}, then answer retry; or abort.",
+                    question=f"O rebase de {self.cp.branch} sobre origin/{self.task.base_branch} deu conflito que o implementador não resolveu. "
+                             f"Resolva à mão em {self.worktree} e responda retry, ou abort.",
                     options=["retry", "abort"], recommendation=0, **decision_text.rebase_conflict(files, reason)), payload={})
                 return
             self.cp.last_commit = self.git.head(self.worktree)
@@ -651,12 +651,12 @@ class Runner:
         elif status.state == "none":
             self._raise_decision("ci_none", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="risk",
-                question=f"No GitHub checks appeared on PR #{self.cp.pr_number} within the grace period. Merge without CI?",
+                question=f"Nenhum check do GitHub apareceu no PR #{self.cp.pr_number} no prazo. Faz o merge sem CI?",
                 options=["merge without CI", "abort"], recommendation=1, **decision_text.ci_none(self.cp.pr_number)), payload={})
         else:
             self._raise_decision("ci_timeout", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
-                question=f"GitHub checks on PR #{self.cp.pr_number} did not finish within the timeout. Keep waiting?",
+                question=f"Os checks do PR #{self.cp.pr_number} não terminaram no prazo. Continua esperando?",
                 options=["keep waiting", "abort"], recommendation=0, **decision_text.ci_timeout(self.cp.pr_number, status.checks)),
                 payload={})
 
@@ -682,10 +682,10 @@ class Runner:
             left = self.git.conflicted_files(self.worktree)
             marked = self.git.files_with_conflict_markers(self.worktree, conflicts)
             if result.decision or result.permission_denials or marked or (left and set(left) - set(conflicts)):
-                reason = (f"conflict markers left in {', '.join(marked)}" if marked else
-                          "the implementer asked a question instead" if result.decision else
-                          "the guard blocked an action during the resolution" if result.permission_denials else
-                          f"new conflicts in {', '.join(sorted(set(left) - set(conflicts)))}")
+                reason = (f"sobraram marcadores de conflito em {', '.join(marked)}" if marked else
+                          "o implementador fez uma pergunta em vez de resolver" if result.decision else
+                          "o guard bloqueou uma ação durante a resolução" if result.permission_denials else
+                          f"conflitos novos em {', '.join(sorted(set(left) - set(conflicts)))}")
                 break
             self.git.stage(self.worktree, conflicts)
             conflicts = self.git.continue_rebase(self.worktree)
@@ -695,15 +695,15 @@ class Runner:
                 scan = self.scanner.scan_range(self.worktree, f"origin/{self.task.base_branch}",
                                                report_path=self.rundir.path / "gitleaks.rebase.json")
                 if not check.ok:
-                    reason = f"the check command failed after the resolution: {check.output.strip()[-300:]}"
+                    reason = f"o check falhou depois da resolução: {check.output.strip()[-300:]}"
                 elif not scan.clean:
-                    reason = "gitleaks found secrets in the rebased branch"
+                    reason = "o gitleaks achou segredos na branch depois do rebase"
                 else:
                     self.rundir.event("conflict_resolved", rounds=round_, files=seen)
                     return None
                 break
         else:
-            reason = f"still conflicting after {self.config.merge.max_conflict_rounds} rounds"
+            reason = f"ainda em conflito depois de {self.config.merge.max_conflict_rounds} rodadas"
         self.git.abort_rebase(self.worktree)
         self.git.reset_hard(self.worktree, pre_rebase)
         self.rundir.event("conflict_resolution_failed", files=seen, reason=reason[:300])
@@ -716,8 +716,7 @@ class Runner:
         if self.cp.gate_rounds > self.config.merge.max_gate_rounds:
             self._raise_decision("gate_rounds", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
-                question=f"The merge gate failed {self.cp.gate_rounds} times (limit {self.config.merge.max_gate_rounds}). "
-                         f"Last reason: {next_prompt[:300]}. Keep going or abort?",
+                question=f"O gate de merge falhou {self.cp.gate_rounds} vezes (limite {self.config.merge.max_gate_rounds}). Continua ou aborta?",
                 options=["keep going", "abort"], recommendation=1,
                 **decision_text.gate_rounds(self.cp.gate_rounds, self.config.merge.max_gate_rounds, next_prompt)),
                 payload={"next_prompt": next_prompt})
@@ -808,7 +807,7 @@ class Runner:
             kind = "rate limit" if result.error_kind == "rate_limit" else result.error_kind
             self._raise_decision("error", Decision(
                 decision_id=new_decision_id(), run_id=self.run_id, source="orq", decision_type="blocked",
-                question=f"{role} failed ({kind}). Retry or abort?", options=["retry", "abort"],
+                question=f"A chamada do {role} falhou ({kind}). Tenta de novo ou aborta?", options=["retry", "abort"],
                 recommendation=0, **decision_text.agent_error(role, str(kind), result.error or "")), payload={"phase": self.cp.phase})
             raise _Yield()
 
@@ -974,7 +973,7 @@ class Runner:
         action, *remaining = self.cp.denied_actions
         self._raise_decision("guard_pre", Decision(
             decision_id=new_decision_id(), run_id=self.run_id, source="guard", decision_type="risk", destructive=True,
-            question=f"Allow this action once: {action['description']}?", options=["approve", "deny"], recommendation=1,
+            question=f"Permite esta ação uma vez: {action['description']}?", options=["approve", "deny"], recommendation=1,
             **decision_text.guard_pre(action["description"], action.get("rule"), self._current_milestone())),
             payload={"action": action, "remaining": remaining})
 

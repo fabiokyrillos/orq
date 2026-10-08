@@ -13,7 +13,9 @@ from orq.core.answers import AnswerError, record_answer
 from orq.core.checkpoint import Checkpoint
 from orq.core.control import ControlError, abort_run, request_pause, spawn_resume
 from orq.core.models import Decision, RunState
+from orq.core.auto_answer import check as auto_check
 from orq.core.digest import build_digest
+from orq.core.settings import resolve
 from orq.core.summary import read_events
 from orq.notify.messages import (DESTRUCTIVE_HINT, HINT, format_answered_elsewhere, format_decision, format_run_state, format_status,
                                  parse_reply)
@@ -80,14 +82,14 @@ class WhatsAppTasks:
             run = self.store.get_run(decision.run_id)
             if run is None:
                 continue
-            self.client.send(format_decision(decision, run, milestone=self._milestone(run.run_id)))
+            self.client.send(format_decision(decision, run, milestone=self._milestone(run.run_id), auto_minutes=self._auto_minutes(decision, run)))
             self.store.mark_notified("decision", decision.decision_id, CHANNEL, at=self._clock())
             RunDir(self.paths.run_dir(run.run_id)).event("notified", channel=CHANNEL, decision_id=decision.decision_id, reminder=last is not None)
             sent += 1
         sent += self._progress_once()
         for decision in self.store.answered_elsewhere(CHANNEL):
             # The phone still shows the question; say it is settled so the owner does not answer it again.
-            self.client.send(format_answered_elsewhere(decision))
+            self.client.send(format_answered_elsewhere(decision, minutes=self._waited_minutes(decision)))
             self.store.mark_notified("decision_answered", decision.decision_id, CHANNEL, at=self._clock())
             sent += 1
         for run in self.store.list_runs():
@@ -102,6 +104,20 @@ class WhatsAppTasks:
             RunDir(self.paths.run_dir(run.run_id)).event("notified", channel=CHANNEL, state=run.state.value)
             sent += 1
         return sent
+
+    def _auto_minutes(self, decision: Decision, run) -> int | None:
+        """Minutes after which the automatic-answer policy would take this decision, or None when it never would."""
+        project = self.store.get_project(run.repo)
+        eff = resolve(self.config, self.store.get_settings(), project.settings if project else {}, {})
+        eligible, _ = auto_check(decision, enabled=bool(eff["notify.auto_answer"]), minutes=0,
+                                 max_stakes=eff["notify.auto_answer_max_stakes"], started_at=0, now=0)
+        return int(eff["notify.auto_answer_minutes"]) if eligible else None
+
+    def _waited_minutes(self, decision: Decision) -> int | None:
+        sent = self.store.notified_at("decision", decision.decision_id, CHANNEL)
+        if sent is None or not decision.answered_at:
+            return None
+        return max(0, round((datetime.fromisoformat(decision.answered_at).timestamp() - sent) / 60))
 
     def _milestone_keys(self, run_id: str) -> list[str]:
         return [f"{run_id}:m{e.get('milestone')}:i{e.get('iteration')}" for e in read_events(self.paths.run_dir(run_id))
@@ -174,7 +190,7 @@ class WhatsAppTasks:
         try:
             if reply.kind == "status" and reply.run_id:
                 if self.store.get_run(reply.run_id) is None:
-                    return f"[orq] no run {reply.run_id}"
+                    return f"⚠️ Run {reply.run_id} não existe."
                 return build_digest(self.paths.run_dir(reply.run_id), repo=self.store.get_run(reply.run_id).repo)  # type: ignore[union-attr]
             if reply.kind == "status":
                 every = self.store.list_runs()
@@ -185,36 +201,36 @@ class WhatsAppTasks:
                                      slots=(held, self.config.limits.max_concurrent_runs), queued=queued)
             if reply.kind == "pause":
                 live = request_pause(self.paths, reply.run_id or "")
-                return f"{reply.run_id}: pause requested" + ("" if live else " (no live process; it stays paused until RESUME)")
+                return f"⏸️ {reply.run_id}: pausa pedida" + ("" if live else " (sem processo ativo; fica pausada até RESUME)")
             if reply.kind == "resume":
                 pid = self._spawn(self.paths, reply.run_id or "")
-                return f"{reply.run_id}: resuming (pid {pid})"
+                return f"▶️ {reply.run_id}: retomando (pid {pid})"
             if reply.kind == "abort":
                 warning = abort_run(self.paths, reply.run_id or "")
-                return f"{reply.run_id}: aborted" + (f" ({warning})" if warning else "")
+                return f"🛑 {reply.run_id}: abortada" + (f" ({warning})" if warning else "")
             if reply.kind in ("answer_index", "answer_text", "approve", "deny"):
                 return self._answer(reply.kind, reply.decision_id or "", reply.index, reply.text)
         except (ControlError, AnswerError) as exc:
-            return f"[orq] {exc}"
-        return "[orq] " + HINT
+            return f"⚠️ {exc}"
+        return "🤔 Não entendi.\n" + HINT
 
     def _answer(self, kind: str, decision_id: str, index: int | None, text: str) -> str:
         decision = self.store.get_decision(decision_id)
         if decision is None:
-            return f"[orq] unknown decision {decision_id}"
+            return f"⚠️ Decisão {decision_id} não existe."
         if decision.destructive and kind not in ("approve", "deny"):
-            return "[orq] " + DESTRUCTIVE_HINT.format(id=decision_id)
+            return "⚠️ " + DESTRUCTIVE_HINT.format(id=decision_id)
         if kind == "answer_index":
             if index is None or not 1 <= index <= len(decision.options):
-                options = " ".join(f"{i + 1}={o}" for i, o in enumerate(decision.options)) or "(no numbered options; reply with text)"
-                return f"[orq] {decision_id}: pick 1..{len(decision.options)}: {options}"
+                options = "\n".join(f"{i + 1} = {o}" for i, o in enumerate(decision.options)) or "(sem opções numeradas; responda com texto)"
+                return f"⚠️ {decision_id}: escolha de 1 a {len(decision.options)}\n{options}"
             value = decision.options[index - 1]
         elif kind in ("approve", "deny"):
             value = kind
         else:
             value = text
         answered = record_answer(self.store, self.paths, decision_id, value, via=CHANNEL)
-        return f"[orq] {decision_id} answered: {answered.answer}. The run continues."
+        return f"👍 *{decision_id}* respondida: {answered.answer}\nA run continua."
 
 
 def pending_for(store: Store, run_id: str) -> list[Decision]:

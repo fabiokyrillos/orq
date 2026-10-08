@@ -178,8 +178,8 @@ def test_outbound_sends_pending_decision_once_then_reminds(home: OrqPaths) -> No
     fake = FakeClient()
     now = [1000.0]
     t = tasks(home, store, fake, clock=lambda: now[0])
-    assert t.outbound_once() == 1 and "*[orq] DBBBB · sandbox · iteration 2 · milestone 1/1*" in fake.sent[0]
-    assert "2. after (recommended)" in fake.sent[0]
+    assert t.outbound_once() == 1 and "📦 sandbox · iteração 2 · milestone 1/1 · pergunta do revisor" in fake.sent[0]
+    assert "2️⃣ *after* ⭐" in fake.sent[0]
     assert t.outbound_once() == 0
     now[0] += 3 * 3600 + 1
     assert t.outbound_once() == 1 and len(fake.sent) == 2
@@ -195,7 +195,7 @@ def test_outbound_announces_terminal_states_but_not_old_ones(home: OrqPaths) -> 
     store.create_run(RunRecord(run_id="RBBBBB", repo="o/r", task_title="Later", branch="b"))
     RunDir(home.run_dir("RBBBBB")).create("# Task: Later\n")
     store.set_state("RBBBBB", RunState.FAILED)
-    assert t.outbound_once() == 1 and "RBBBBB · r · FAILED" in fake.sent[0]
+    assert t.outbound_once() == 1 and fake.sent[0].startswith("❌ *Falhou* · RBBBBB · r")
     assert t.outbound_once() == 0
 
 
@@ -207,9 +207,9 @@ def test_inbound_answers_commands_and_cursor(home: OrqPaths) -> None:
 
     assert t.inbound_once() == 3
     assert store.get_decision("DBBBB").answer == "after" and store.get_decision("DBBBB").answered_via == "whatsapp"
-    assert fake.sent[0].startswith("[orq] DBBBB answered: after")
-    assert fake.sent[1].startswith("*[orq] STATUS*") and "RAAAAA" in fake.sent[1]
-    assert "Reply with the decision ID" in fake.sent[2]
+    assert fake.sent[0].startswith("👍 *DBBBB* respondida: after")
+    assert fake.sent[1].startswith("📋 *Status*") and "RAAAAA" in fake.sent[1]
+    assert "Responda começando pelo ID da decisão" in fake.sent[2]
     assert fake.acked == [[1, 2, 3]] and store.kv_get("whatsapp_cursor") == "3"
     assert t.inbound_once() == 0  # nothing new past the cursor
 
@@ -220,18 +220,18 @@ def test_inbound_destructive_requires_approve_or_deny(home: OrqPaths) -> None:
     fake.inbox = [InboundMessage(1, "DGGGG 1"), InboundMessage(2, "DGGGG yes please"), InboundMessage(3, "APPROVE DGGGG")]
     t = tasks(home, store, fake)
     t.inbound_once()
-    assert "reply exactly `APPROVE DGGGG`" in fake.sent[0] and "reply exactly" in fake.sent[1]
+    assert "responda exatamente `APPROVE DGGGG`" in fake.sent[0] and "responda exatamente" in fake.sent[1]
     assert store.get_decision("DGGGG").answer == "approve"
-    assert fake.sent[2].startswith("[orq] DGGGG answered: approve")
+    assert fake.sent[2].startswith("👍 *DGGGG* respondida: approve")
 
 
 def test_inbound_index_out_of_range_and_unknown_decision(home: OrqPaths) -> None:
     store = seed(home, decision=business())
     fake = FakeClient()
     t = tasks(home, store, fake)
-    assert "pick 1..2: 1=before 2=after" in t.handle("DBBBB 9")
-    assert "unknown decision DZZZZ" in t.handle("DZZZZ 1")
-    assert "answered: before" in t.handle("DBBBB 1")
+    assert "escolha de 1 a 2\n1 = before\n2 = after" in t.handle("DBBBB 9")
+    assert "Decisão DZZZZ não existe" in t.handle("DZZZZ 1")
+    assert "respondida: before" in t.handle("DBBBB 1")
     assert "already answered" in t.handle("DBBBB 2")
 
 
@@ -240,9 +240,9 @@ def test_inbound_run_commands(home: OrqPaths) -> None:
     fake = FakeClient()
     spawned: list[str] = []
     t = tasks(home, store, fake, spawn=lambda p, r: spawned.append(r) or 55)
-    assert "pause requested" in t.handle("PAUSE RAAAAA") and (home.run_dir("RAAAAA") / "pause.requested").exists()
-    assert t.handle("RESUME RAAAAA") == "RAAAAA: resuming (pid 55)" and spawned == ["RAAAAA"]
-    assert t.handle("ABORT RAAAAA") == "RAAAAA: aborted" and store.get_run("RAAAAA").state is RunState.ABORTED
+    assert "pausa pedida" in t.handle("PAUSE RAAAAA") and (home.run_dir("RAAAAA") / "pause.requested").exists()
+    assert t.handle("RESUME RAAAAA") == "▶️ RAAAAA: retomando (pid 55)" and spawned == ["RAAAAA"]
+    assert t.handle("ABORT RAAAAA") == "🛑 RAAAAA: abortada" and store.get_run("RAAAAA").state is RunState.ABORTED
     assert "no run RNOPE1" in t.handle("ABORT RNOPE1")
 
 
@@ -491,7 +491,7 @@ def test_outbound_tells_when_a_decision_was_answered_on_another_channel(home: Or
     t.outbound_once()                                        # the question went to WhatsApp
     record_answer(store, home, "DBBBB", "0", via="dashboard")
 
-    assert t.outbound_once() == 1 and fake.sent[-1] == "[orq] DBBBB answered on the dashboard: before. Nothing to do here."
+    assert t.outbound_once() == 1 and fake.sent[-1] == "✅ *DBBBB* respondida por você no dashboard\n➡️ before\n_Nada a fazer aqui._"
     assert t.outbound_once() == 0
 
 
@@ -514,7 +514,7 @@ def test_failed_and_aborted_carry_their_reason(home: OrqPaths) -> None:
 
     t.outbound_once()
 
-    assert "RAAAAA · sandbox · FAILED" in fake.sent[-1] and fake.sent[-1].endswith("max iterations (3) reached")
+    assert fake.sent[-1].startswith("❌ *Falhou* · RAAAAA · sandbox") and fake.sent[-1].endswith("📝 Motivo: max iterations (3) reached")
 
 
 # Phase 6: progress digests
@@ -534,10 +534,10 @@ def test_progress_digest_on_milestone_end_and_on_the_timer(home: OrqPaths) -> No
 
     assert t.outbound_once() == 0                         # nothing new since the hub started, timer not due
     RunDir(home.run_dir("RAAAAA")).event("milestone_done", iteration=1, milestone=1, of=1)
-    assert t.outbound_once() == 1 and fake.sent[-1].startswith("*[orq] RAAAAA · sandbox ·") and "Done:" in fake.sent[-1]
+    assert t.outbound_once() == 1 and fake.sent[-1].startswith("📊 *Progresso* · RAAAAA · sandbox") and "✅ *Feito*" in fake.sent[-1]
     assert t.outbound_once() == 0
     now[0] += 30 * 60 + 1
-    assert t.outbound_once() == 1 and "Latest: The greeting file exists." in fake.sent[-1]
+    assert t.outbound_once() == 1 and "📝 *Última atualização*\nThe greeting file exists." in fake.sent[-1]
 
 
 def test_no_timer_digest_while_waiting_for_the_owner(home: OrqPaths) -> None:
@@ -546,14 +546,14 @@ def test_no_timer_digest_while_waiting_for_the_owner(home: OrqPaths) -> None:
     now = [time_of_first_event(home) + 3 * 3600]
     t = tasks(home, store, fake, clock=lambda: now[0])
     t.outbound_once()                                      # the decision itself
-    assert not any(m.startswith("*[orq] RAAAAA") for m in fake.sent)
+    assert not any(m.startswith("📊 *Progresso* · RAAAAA") for m in fake.sent)
 
 
 def test_status_of_one_run_returns_its_digest(home: OrqPaths) -> None:
     store = working_run(home)
     fake = FakeClient()
     reply = tasks(home, store, fake).handle("STATUS RAAAAA")
-    assert reply.startswith("*[orq] RAAAAA · sandbox ·") and "Latest: The greeting file exists." in reply
+    assert reply.startswith("📊 *Progresso* · RAAAAA · sandbox") and "The greeting file exists." in reply
 
 
 def test_digest_endpoint(home: OrqPaths) -> None:

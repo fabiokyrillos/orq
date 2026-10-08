@@ -793,8 +793,8 @@ def test_gate_rebase_conflict_asks_owner(env, tmp_path: Path) -> None:
                   human=lambda d: asked.append(d) or "abort")
 
     assert asyncio.run(runner.execute()) is RunState.ABORTED
-    assert asked[-1].options == ["retry", "abort"] and "conflicts" in asked[-1].question
-    assert "README.md" in asked[-1].context and "conflict markers left in README.md" in asked[-1].context
+    assert asked[-1].options == ["retry", "abort"] and "deu conflito" in asked[-1].question
+    assert "README.md" in asked[-1].context and "sobraram marcadores de conflito em README.md" in asked[-1].context
     assert (runner.worktree / "README.md").read_text(encoding="utf-8") == "ours\n"   # the attempt was undone
     assert not runner.git.rebase_in_progress(runner.worktree)
 
@@ -866,7 +866,7 @@ def test_gate_rounds_exhausted_asks_owner(env) -> None:
     runner.config.merge.max_gate_rounds = 2
 
     assert asyncio.run(runner.execute()) is RunState.ABORTED
-    assert asked[-1].options == ["keep going", "abort"] and "3 times" in asked[-1].question
+    assert asked[-1].options == ["keep going", "abort"] and "3 vezes" in asked[-1].question
 
 
 def test_gate_no_ci_asks_and_merge_without_ci_continues(env) -> None:
@@ -1212,9 +1212,10 @@ def test_guard_decision_explains_the_rule_and_the_milestone(env) -> None:
     asyncio.run(runner.execute())
 
     d = runner.store.pending_decisions(runner.run_id)[0]
-    assert d.question == "Allow this action once: Bash: git reset --hard?"
-    assert d.context.startswith('While working on milestone "the whole task", the implementer tried to run `Bash: git reset --hard`')
-    assert "throws away uncommitted changes" in d.context and len(d.option_details) == 2 and d.recommendation_reason
+    assert d.question == "Permite esta ação uma vez: Bash: git reset --hard?"
+    assert d.context.startswith('No milestone "the whole task", o implementador tentou rodar `Bash: git reset --hard`')
+    assert "descarta mudanças não commitadas" in d.context and len(d.option_details) == 2 and d.recommendation_reason
+    assert d.stakes == "high"
 
 
 def test_plan_approval_shows_goals_and_done_when(env) -> None:
@@ -1225,8 +1226,8 @@ def test_plan_approval_shows_goals_and_done_when(env) -> None:
 
     assert asyncio.run(runner.execute()) is RunState.AWAITING_PLAN_APPROVAL
     d = runner.store.pending_decisions(runner.run_id)[0]
-    assert "1. Add greeting [mechanical]: goal of Add greeting Done when: Add greeting is in place" in d.context
-    assert d.context.startswith("the plan") and d.option_details[1].startswith("the planner plans again")
+    assert "1. Add greeting [mechanical]: goal of Add greeting\n   Pronto quando: Add greeting is in place" in d.context
+    assert d.context.startswith("the plan") and d.option_details[1].startswith("o planejador planeja de novo")
 
 
 def test_owner_updates_are_kept_for_the_digest(env) -> None:

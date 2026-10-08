@@ -13,7 +13,8 @@ HUMAN_GUIDE = """How to ask the owner (fill every field; the owner reads it on a
 - option_details: one sentence per option, in the same order: what will happen in the code and for the user of the software if the owner picks it.
 - recommendation: index of the option you recommend; recommendation_reason: one sentence explaining why.
 - stakes: "low" for a reversible technical detail that changes nothing for the software's users; "medium" for visible behaviour or extra work; "high" for business rules, data, money, security or anything hard to undo. When the owner allows it, a "low" decision left unanswered is answered with your recommendation, so never rate a business question "low".
-- Plain language. Explain any repository-specific name in a few words."""
+- Plain language. Explain any repository-specific name in a few words.
+- Language: write context, question, options, option_details and recommendation_reason in Brazilian Portuguese (the owner reads them on WhatsApp). Keep code names, file names and commands as they are."""
 
 IMPLEMENTER_RULES = """You are the implementer in an automated loop. A separate reviewer reads your work after every turn.
 Standing rules:
@@ -37,7 +38,7 @@ Standing rules:
 - Otherwise status continue, with next_prompt: concrete, self-contained instructions for the implementer's next turn. Mention file names.
 - Keep summary to a few sentences. List real problems in issues with a severity.
 - task_complete: true only with status done when every acceptance criterion of the whole task already holds in the repository; the remaining milestones are then skipped. Otherwise false.
-- owner_update is for the owner, not the implementer: 2 to 4 plain sentences on what this iteration achieved and what comes next, in terms of the task's behaviour (explain any file or function name). Use an empty string only when nothing changed.
+- owner_update is for the owner, not the implementer: 2 to 4 plain sentences in Brazilian Portuguese on what this iteration achieved and what comes next, in terms of the task's behaviour (explain any file or function name). Use an empty string only when nothing changed.
 - human must be null unless status is needs_human.
 """ + HUMAN_GUIDE
 

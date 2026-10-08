@@ -43,12 +43,20 @@ def test_digest_lists_done_milestones_and_what_is_happening(tmp_path: Path) -> N
     text = build_digest(make_run(tmp_path, EVENTS))
 
     lines = text.splitlines()
-    assert lines[0] == "*[orq] RDIG01 · shop · IMPLEMENTING · 12m of work*"  # the 28 minutes waiting for the owner are not work
-    assert lines[1] == "Invoice totals"
-    assert "Done:" in lines and "- 1/3 Totals: Totals now round half up and every test passes." in lines
-    assert "Now: milestone 2/3 Discounts, iteration 3" in lines
-    assert "Latest: Totals now round half up and every test passes." in lines
-    assert lines[-1] == "Checks 1/2 passed · 2 files changed"
+    assert lines[:3] == ["📊 *Progresso* · RDIG01 · shop", "Invoice totals", "⏱️ 12 min de trabalho · IMPLEMENTING"]  # owner time excluded
+    assert lines[3:6] == ["", "✅ *Feito*", "• 1/3 *Totals*: Totals now round half up and every test passes."]
+    assert lines[6:9] == ["", "🔨 *Agora*", "milestone 2/3 *Discounts* · iteração 3 · implementando"]
+    assert lines[9:12] == ["", "📝 *Última atualização*", "Totals now round half up and every test passes."]
+    assert lines[-1] == "🧪 1/2 checks ok · 📁 2 arquivos alterados"
+
+
+def test_a_finished_digest_lists_the_last_milestone(tmp_path: Path) -> None:
+    events = EVENTS + [ev(41, "owner_update", iteration=3, milestone=3, text="Docs written; all done."), ev(45, "state", state="DONE")]
+
+    lines = build_digest(make_run(tmp_path, events, milestone_index=2)).splitlines()
+
+    assert "• 3/3 *Docs*: Docs written; all done." in lines and "🔨 *Agora*" not in lines
+    assert lines[2].endswith("· concluída")
 
 
 def test_digest_mentions_a_pending_decision_and_is_capped(tmp_path: Path) -> None:
@@ -59,7 +67,7 @@ def test_digest_mentions_a_pending_decision_and_is_capped(tmp_path: Path) -> Non
 
     text = build_digest(run_dir)
 
-    assert "Waiting for you: DQQQQ" in text and len(text) <= 1500
+    assert "⏳ Esperando você: DQQQQ" in text and len(text) <= 1500
 
 
 def test_digest_without_plan_or_events(tmp_path: Path) -> None:
