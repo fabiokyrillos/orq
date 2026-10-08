@@ -184,7 +184,9 @@ After using the Phase 7 dashboard, the owner asked for:
 * **Run `R2NTVW`** (sandbox B after removal, "Add a sign helper"):
   * `repo_cloned source=github`, so the clone was recreated;
   * the planner call then failed with a transient OpenAI `503 Service Unavailable` ("Reconnecting... 2/5"), which became the low-stakes decision DNSTL (`retry`/`abort`, recommended `retry`) for the owner;
-  * result: RESULT_R2NTVW.
+  * the owner answered `retry` on WhatsApp; the reviewer then hit the same 503, which became D9VAZ, also answered `retry`;
+  * 20:49:41 PR #6 merged, DONE.
+* Afterwards the owner set the slots to 3 in the dashboard; that is the owner's setting now.
 
 ### 9.4 Follow-ups noted
 

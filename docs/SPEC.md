@@ -641,7 +641,7 @@ Status: complete on 2026-10-08 (see `docs/phase7-findings.md`): run `R59GV9` clo
 * The dashboard is in Brazilian Portuguese (`CLAUDE.md` exception), the rail is fixed, settings are in sections, Add project adds several repos at once.
 * The hub runs under `pythonw`: agent processes it starts (the chat) get `CREATE_NO_WINDOW` too; without a console, claude stopped after its first tool call.
 
-Status: see `docs/phase7-findings.md` section 9.
+Status: complete on 2026-10-08 (see `docs/phase7-findings.md` section 9): every item checked on the owner's hub; run `R2NTVW` recreated a removed project's clone and merged.
 
 ## 16. Non goals
 
