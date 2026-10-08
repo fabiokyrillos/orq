@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def scan_local(roots: list[str], depth: int, git: GitManager) -> list[LocalRepo]
     A folder with a `.git` directory is a checkout and the walk stops there. A `.git` file (linked worktree,
     submodule) is skipped: its main repo is the one to list. Hidden folders and SKIP_DIRS are not walked.
     """
-    found: dict[str, LocalRepo] = {}
+    checkouts: dict[str, Path] = {}
     for root in roots:
         start = Path(root).expanduser()
         if not start.is_dir():
@@ -53,14 +54,14 @@ def scan_local(roots: list[str], depth: int, git: GitManager) -> list[LocalRepo]
             folder, level = queue.popleft()
             dot_git = folder / ".git"
             if dot_git.is_dir():
-                repo = _local_repo(folder, git)
-                if repo is not None:
-                    found.setdefault(str(folder.resolve()).lower(), repo)
+                checkouts.setdefault(str(folder.resolve()).lower(), folder)
                 continue
             if dot_git.exists() or level >= depth:
                 continue
             queue.extend((child, level + 1) for child in _subdirs(folder))
-    return sorted(found.values(), key=lambda r: (r.repo.lower(), r.path.lower()))
+    # One checkout at a time: concurrent git children on Windows sometimes stall ~5 s each (Phase 7 finding).
+    found = [r for r in (_local_repo(folder, git) for folder in checkouts.values()) if r is not None]
+    return sorted(found, key=lambda r: (r.repo.lower(), r.path.lower()))
 
 
 def _subdirs(folder: Path) -> list[Path]:
@@ -99,11 +100,13 @@ def list_github(gh: GhRunner) -> list[RemoteRepo]:
 def candidates(store: Store, git: GitManager, roots: list[str], depth: int) -> dict:
     """What the Add project page offers: local folders first, then GitHub repos that are not on this PC."""
     added = {p.repo.lower() for p in store.list_projects()}
-    local = scan_local(roots, depth, git)
-    try:
-        remote, error = list_github(git.gh), None
-    except (GitError, json.JSONDecodeError, KeyError) as exc:
-        remote, error = [], str(exc)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        listing = pool.submit(list_github, git.gh)  # gh runs while the folders are scanned
+        local = scan_local(roots, depth, git)
+        try:
+            remote, error = listing.result(), None
+        except (GitError, json.JSONDecodeError, KeyError) as exc:
+            remote, error = [], str(exc)
     private = {r.repo.lower(): r.private for r in remote}
     on_pc = {r.repo.lower() for r in local}
     return {
