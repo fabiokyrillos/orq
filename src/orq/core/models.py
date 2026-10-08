@@ -63,7 +63,7 @@ class Project:
     base_branch: str = "main"
     check_command: str = ""
     max_concurrent: int | None = None  # None: [queue].project_concurrency
-    local_path: str | None = None  # the folder it was added from, informational only
+    local_path: str | None = None  # the owner's folder it was added from; seeds orq's clone, only read (Phase 7)
     created_at: str | None = None
     settings: dict = field(default_factory=dict)  # Phase 6 overrides (orq.core.settings keys)
 

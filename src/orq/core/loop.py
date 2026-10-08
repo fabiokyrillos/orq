@@ -323,7 +323,10 @@ class Runner:
 
     def _setup(self) -> None:
         self._transition(RunState.QUEUED)
-        repo_path = self.git.ensure_repo(self.task.repo, self.paths.repos, clone_url=self.clone_url or self.cp.clone_url)
+        project = self.store.get_project(self.task.repo)
+        repo_path = self.git.ensure_repo(self.task.repo, self.paths.repos, clone_url=self.clone_url or self.cp.clone_url,
+                                         seed=project.local_path if project else None,
+                                         on_clone=lambda source: self.rundir.event("repo_cloned", source=source))
         if self.git.branch_exists(repo_path, self.cp.branch):
             # A previous run of the same task left its branch behind; keep both apart.
             self.cp.branch = f"{self.cp.branch}-{self.run_id.lower()}"

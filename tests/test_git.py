@@ -259,3 +259,80 @@ def test_start_rebase_without_conflicts_returns_nothing(manager: GitManager, rep
     seed_push(origin, tmp_path, "other.txt", "other\n")
 
     assert manager.start_rebase(worktree, "main") == [] and not manager.rebase_in_progress(worktree)
+
+
+# Phase 7: orq's clone seeded from the owner's local folder, which orq only reads
+
+
+@pytest.fixture
+def owner_checkout(origin: Path, tmp_path: Path) -> Path:
+    """The owner's own clone: another branch checked out, an uncommitted file, a hook and a linked worktree."""
+    folder = tmp_path / "Projetos" / "Sandbox" / "sandbox"
+    folder.parent.mkdir(parents=True)
+    git("clone", "-q", str(origin), str(folder), cwd=tmp_path)
+    git("checkout", "-q", "-b", "owner/feature", cwd=folder)
+    (folder / "notes.txt").write_text("work in progress\n", encoding="utf-8")
+    (folder / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    git("worktree", "add", "-q", "-b", "owner/other", str(tmp_path / "Projetos" / "other-wt"), "main", cwd=folder)
+    return folder
+
+
+def snapshot(folder: Path) -> dict:
+    gitdir = folder / ".git"
+    return {
+        "config": (gitdir / "config").read_bytes(),
+        "head": git("rev-parse", "HEAD", cwd=folder),
+        "branch": git("branch", "--show-current", cwd=folder),
+        "refs": git("for-each-ref", cwd=folder),
+        "status": git("--no-optional-locks", "status", "--porcelain", cwd=folder),
+        "worktrees": git("worktree", "list", "--porcelain", cwd=folder),
+        "hooks": sorted(p.name for p in (gitdir / "hooks").iterdir()),
+        "siblings": sorted(p.name for p in folder.parent.iterdir()),
+    }
+
+
+def test_seeded_clone_uses_the_local_folder_and_leaves_it_untouched(manager: GitManager, origin: Path, owner_checkout: Path,
+                                                                    tmp_path: Path) -> None:
+    before = snapshot(owner_checkout)
+    sources: list[str] = []
+
+    path = manager.ensure_repo("owner/sandbox", tmp_path / "repos", clone_url=str(origin), seed=owner_checkout, on_clone=sources.append)
+    manager.create_worktree(path, tmp_path / "wt" / "R1", branch="orq/task", base="main")
+
+    assert sources == [f"local:{(owner_checkout / '.git').resolve().as_posix()}"]
+    assert not (path / ".git" / "objects" / "info" / "alternates").exists()  # dissociated: the folder can go away
+    assert git("remote", "get-url", "origin", cwd=path).strip() == str(origin)
+    assert snapshot(owner_checkout) == before
+
+
+def test_seed_from_a_linked_worktree_uses_its_main_repo(manager: GitManager, origin: Path, owner_checkout: Path,
+                                                        tmp_path: Path) -> None:
+    sources: list[str] = []
+    manager.ensure_repo("owner/sandbox", tmp_path / "repos", clone_url=str(origin), seed=tmp_path / "Projetos" / "other-wt",
+                        on_clone=sources.append)
+
+    assert sources == [f"local:{(owner_checkout / '.git').resolve().as_posix()}"]
+
+
+@pytest.mark.parametrize("kind", ["missing", "plain folder", "shallow"])
+def test_unusable_seed_falls_back_to_a_plain_clone(manager: GitManager, origin: Path, tmp_path: Path, kind: str) -> None:
+    seed = tmp_path / "seed-folder"
+    if kind == "plain folder":
+        seed.mkdir()
+    elif kind == "shallow":
+        git("clone", "-q", "--depth", "1", origin.as_uri(), str(seed), cwd=tmp_path)
+    sources: list[str] = []
+
+    path = manager.ensure_repo("owner/sandbox", tmp_path / "repos", clone_url=str(origin), seed=seed, on_clone=sources.append)
+
+    assert sources == ["github"]
+    assert git("rev-parse", "HEAD", cwd=path).strip()
+
+
+def test_existing_clone_ignores_the_seed(manager: GitManager, origin: Path, owner_checkout: Path, repo: Path,
+                                         tmp_path: Path) -> None:
+    sources: list[str] = []
+    again = manager.ensure_repo("owner/sandbox", tmp_path / "repos", clone_url=str(origin), seed=owner_checkout,
+                                on_clone=sources.append)
+
+    assert again == repo and sources == []

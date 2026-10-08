@@ -62,8 +62,14 @@ class GitManager:
         """Concurrent runs share one clone: serialise the commands that write shared refs or the worktree list."""
         return file_lock(self.lock_path(path), timeout=self._lock_timeout)
 
-    def ensure_repo(self, repo: str, repos_root: Path, clone_url: str | None = None) -> Path:
-        """Clone `owner/repo` to repos_root/owner/repo (or fetch if present) and return the checkout path."""
+    def ensure_repo(self, repo: str, repos_root: Path, clone_url: str | None = None, *, seed: Path | str | None = None,
+                    on_clone: Callable[[str], None] | None = None) -> Path:
+        """Clone `owner/repo` to repos_root/owner/repo (or fetch if present) and return the checkout path.
+
+        Phase 7: `seed` is the owner's own checkout of the repo. A new clone borrows its objects (`--reference`) and copies
+        them (`--dissociate`), so nothing is downloaded twice and the clone does not depend on the folder. The folder is
+        only read. `on_clone` gets `local:<git dir>` or `github`.
+        """
         owner, name = repo.split("/", 1)
         path = repos_root / owner / name
         self._lock_paths[path] = path.with_name(name + ".orq.lock")
@@ -73,8 +79,32 @@ class GitManager:
                 return path
             path.parent.mkdir(parents=True, exist_ok=True)
             url = clone_url or f"https://github.com/{repo}.git"
-            self.git("clone", "-q", "-c", "core.longpaths=true", "-c", "core.autocrlf=false", url, str(path), cwd=path.parent)
+            clone = ["clone", "-q", "-c", "core.longpaths=true", "-c", "core.autocrlf=false"]
+            seed_dir = self._seed_git_dir(Path(seed)) if seed else None
+            if seed_dir is not None:
+                try:
+                    self.git(*clone, "--reference", str(seed_dir), "--dissociate", url, str(path), cwd=path.parent)
+                except GitError:
+                    shutil.rmtree(path, ignore_errors=True)  # a shallow or broken seed: start over without it
+                    seed_dir = None
+            if seed_dir is None:
+                self.git(*clone, url, str(path), cwd=path.parent)
+        if on_clone:
+            on_clone(f"local:{seed_dir.as_posix()}" if seed_dir else "github")
         return path
+
+    def _seed_git_dir(self, folder: Path) -> Path | None:
+        """The git dir shared by `folder` and its worktrees, or None when `folder` is not the top of a checkout."""
+        if not folder.is_dir():
+            return None
+        try:
+            top = Path(self.git("rev-parse", "--show-toplevel", cwd=folder).strip())
+            common = Path(self.git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=folder).strip())
+        except GitError:
+            return None
+        if top.resolve() != folder.resolve():  # a plain folder inside some other repo
+            return None
+        return common.resolve()
 
     def create_worktree(self, repo_path: Path, worktree: Path, branch: str, base: str) -> None:
         with self._locked(repo_path):

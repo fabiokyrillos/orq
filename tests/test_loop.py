@@ -9,7 +9,7 @@ import pytest
 from orq.adapters.base import AgentResult
 from orq.config import Config
 from orq.core.loop import Runner, SandboxError
-from orq.core.models import Decision, RunState
+from orq.core.models import Decision, Project, RunState
 from orq.core.task import parse_task
 from orq.git.manager import GitError, GitManager
 from orq.paths import OrqPaths
@@ -300,6 +300,32 @@ def test_branch_gets_run_id_suffix_when_name_is_taken(env, origin: Path, tmp_pat
 
     assert runner.branch == f"orq/add-greeting-{runner.run_id.lower()}"
     assert runner.store.get_run(runner.run_id).branch == runner.branch
+
+
+
+def events_of(paths: OrqPaths, run_id: str, kind: str) -> list[dict]:
+    lines = (paths.run_dir(run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(l) for l in lines if json.loads(l)["type"] == kind]
+
+
+def test_clone_is_seeded_from_the_project_folder(env, tmp_path: Path) -> None:
+    make, paths, _ = env
+    Store(paths.db).upsert_project(Project(repo="owner/sandbox", name="sandbox", local_path=str(tmp_path / "seed")))
+    runner = make(FakeImplementer([ok()]), FakeReviewer([review("done", None)]))
+
+    asyncio.run(runner.execute())
+
+    [event] = events_of(paths, runner.run_id, "repo_cloned")
+    assert event["source"] == f"local:{(tmp_path / 'seed' / '.git').resolve().as_posix()}"
+
+
+def test_clone_without_a_project_folder_comes_from_github(env) -> None:
+    make, paths, _ = env
+    runner = make(FakeImplementer([ok()]), FakeReviewer([review("done", None)]))
+
+    asyncio.run(runner.execute())
+
+    assert [e["source"] for e in events_of(paths, runner.run_id, "repo_cloned")] == ["github"]
 
 
 # Phase 2: guard denials
