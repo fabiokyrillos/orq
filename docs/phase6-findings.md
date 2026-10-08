@@ -229,4 +229,47 @@ Header status; environment (Codex CLI 0.161.0, model availability, unelevated sa
 
 * The owner's two checks: the decision messages on the phone, and the autostart after a reboot.
 * Real projects (the volleyball repo first), now with per-project protected paths and models.
-* A finished run's digest could list its last milestone.
+* A finished run's digest could list its last milestone (done in 6.1).
+
+## 7. Phase 6.1 (2026-10-08): who answered, automatic answers, readable messages
+
+Design: `docs/superpowers/specs/2026-10-08-phase6-1-auto-answer-and-messages-design.md`.
+
+### 7.1 Why
+
+On the phone the owner saw three decisions "answered on the dashboard" and read it as orq approving things by itself. In fact Claude (the coding assistant) had answered them during the Phase 6 tests, after 8 minutes without a reply.
+
+The owner asked for three things:
+* every answer says who gave it;
+* a bounded way for decisions to be answered when he does not answer;
+* messages that are easier to read.
+
+### 7.2 What changed
+
+* **`answered_by` (`owner` | `claude` | `auto`) on every answer.** The dashboard page answers as the owner. Claude must pass `by="claude"` (API) or `--by claude` (CLI). `DECISIONS.md`, the summary and WhatsApp show who answered.
+* **`stakes` (`low` | `medium` | `high`).** The asking agent rates it; orq rates its own decisions (agent-error retry and CI wait `low`, no progress `medium`, everything else `high`). The prompt tells the agents never to rate a business question `low`.
+* **Automatic answers.** Opt-in (`notify.auto_answer`, global or per project in the dashboard), off by default. The answer is the recommendation, after `auto_answer_minutes` (30 by default) since WhatsApp got the question, only up to `auto_answer_max_stakes` (`low`). Never automatic: destructive actions, business rules, guard decisions, plan approvals, a missing recommendation or reason, or a recommendation to abort. The decision message says when the policy would answer it.
+* **Messages in Brazilian Portuguese, formatted for a phone.** `CLAUDE.md` records the exception. The layout is in SPEC 9.3. The agents write their owner-facing fields in Portuguese, and orq's own decision texts are Portuguese. Machine keywords are unchanged.
+
+### 7.3 Real run `RV767J` (sandbox, automatic answers on with 3 minutes for the test)
+
+```
+14:40:51 PLANNING
+14:41:34 planner asks D2HN6 (ambiguity: round partial minutes up or to the nearest), stakes low
+14:41:38 WhatsApp, in the new layout, with "se você não responder, orq escolhe a recomendada em 3 min"
+14:42:25 the owner answers on WhatsApp ("Sempre para cima"), recorded by=owner, 47 s later
+14:42:53 plan: 1 milestone, rounding up as answered
+14:45:58 DONE, sandbox PR #10 merged
+```
+
+* The owner answered first, so the automatic answer correctly did not happen. Its path is covered by `tests/test_auto_answer.py`:
+  * every exclusion;
+  * the eligible case;
+  * the hub task answering once and logging `auto_answered`.
+* The planner wrote context, options and consequences in Portuguese and rated the purely technical question `low`, as the task described it.
+* Automatic answers were set back to the default (off) on the sandbox after the run.
+
+### 7.4 Small follow-ups found
+
+* A blank line now separates the reply line from the recommendation.
+* A finished run's digest lists its last milestone.

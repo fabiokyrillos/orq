@@ -108,6 +108,8 @@ def format_decision(decision: Decision, run: RunRecord, *, milestone: str | None
     if auto_minutes is not None:
         footer.append(f"⚙️ Complexidade {_STAKES.get(decision.stakes, decision.stakes)} · se você não responder, "
                       f"orq escolhe a recomendada em {auto_minutes} min")
+    if footer:
+        footer.append("")  # the reply line stands apart from the recommendation
     if decision.destructive:
         footer.append(f"↩️ Responda `APPROVE {decision.decision_id}` ou `DENY {decision.decision_id}` (número não vale)")
     elif decision.options:

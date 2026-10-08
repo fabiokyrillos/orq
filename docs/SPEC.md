@@ -214,6 +214,14 @@ Phase 6: `context`, `option_details` and `recommendation_reason`. Decisions from
 
 `DECISIONS.md` records the context with the answer, so both agents keep the evidence. `abort` marks a run's pending decisions `expired`.
 
+Phase 6.1: `answered_by` (`owner` | `claude` | `auto`) records who answered, besides the channel (`answered_via`, plus `auto`). The dashboard API and `orq answer` take `by`; `owner` is the default. `stakes` (`low` | `medium` | `high`) is rated by the asking agent (a field of the `human` object and the marker) or by orq for its own decisions. With the opt-in policy (`[notify].auto_answer`, off by default; per project in the dashboard), the hub answers a pending decision with its recommendation when all of these hold:
+* the owner has not answered for `auto_answer_minutes` since WhatsApp got it;
+* the stakes are at or under `auto_answer_max_stakes` (default `low`);
+* it is not destructive, not `business`, not from the guard, and not a plan approval;
+* there is a recommendation with a reason, and the recommendation is not `abort`.
+
+Event `auto_answered`.
+
 ## 9. Human in the loop
 
 ### 9.1 Detection layers (most reliable first)
@@ -261,6 +269,14 @@ Reply: D7K2 1  or  D7K2 <free text>
 **Commands:** `STATUS`, `PAUSE <run>`, `RESUME <run>`, `ABORT <run>`.
 
 Phase 4 implementation: `docs/n8n/orq-workflow.json` (webhooks `orq/notify`, `orq/replies`, `orq/replies/ack`, plus `orq/evolution` for Evolution's `MESSAGES_UPSERT`), `docs/n8n-setup.md`. Numbered replies are 1-based as printed in the message. `RESUME` spawns a detached `orq resume` on the PC; `ABORT` refuses a live run. Unknown messages get a one-line hint. Reminders are sent by the hub every `[notify].reminder_hours` while a decision is pending; run completions (`DONE`, `FAILED`, `ABORTED`) are announced once.
+
+Phase 6.1: messages are in Brazilian Portuguese (owner's decision, recorded in `CLAUDE.md`) and laid out for a phone:
+* a header with an emoji per decision type;
+* `*Contexto*`, `❓ *Pergunta*`, then `*Opções*` with one `↳` consequence per option;
+* `💡 *Recomendo a n:*`, plus the time of an automatic answer when the policy would take it;
+* the reply line.
+
+Blank lines separate the sections, the context keeps its line breaks, and the cap is 2000 characters. An answer given elsewhere says who gave it (`por você`, `pelo Claude`, `automaticamente pelo orq (n min sem resposta)`). Machine keywords (`APPROVE`, `DENY`, `STATUS`, IDs) are unchanged. The section 9.3 example above shows the Phase 4 layout.
 
 **Note:** Evolution API uses an unofficial WhatsApp Web session. Use a dedicated sender number, not the owner's personal one.
 
@@ -459,6 +475,9 @@ outbox_poll_seconds = 5                   # new decisions and run states (hub)
 answer_poll_seconds = 3                   # a waiting run re-reads SQLite this often
 reminder_hours = 3
 progress_minutes = 30                     # digest of a working run this often and when a milestone ends; 0 disables
+auto_answer = false                       # Phase 6.1: answer low-stakes decisions with the recommendation when the owner does not
+auto_answer_minutes = 30
+auto_answer_max_stakes = "low"
 
 [dashboard]
 port = 8765                               # 127.0.0.1 only
@@ -584,6 +603,14 @@ Status: complete on 2026-10-07 (see `docs/phase5-findings.md`).
 * after a reboot the hub starts by itself.
 
 Status: see `docs/phase6-findings.md`.
+
+### Phase 6.1: attribution, automatic answers, readable messages (owner's request after reading Phase 6 on the phone)
+
+* Every answer records who gave it.
+* Opt-in automatic answers for low-stakes decisions after a timeout (8.4).
+* Formatted Portuguese WhatsApp messages (9.3).
+
+Status: complete on 2026-10-08 (see `docs/phase6-findings.md` section 7).
 
 ## 16. Non goals
 
