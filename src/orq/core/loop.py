@@ -32,7 +32,7 @@ from orq.core.prompts import (IMPLEMENTER_RULES, build_conflict_prompt, build_im
 from orq.core.queue import QueueError, check_sandbox, create_run
 from orq.core.settings import Effective, resolve
 from orq.core.summary import write_summary
-from orq.core.ratelimit import claude_reset_time
+from orq.core.ratelimit import claude_reset_time, transient_error
 from orq.core.settings import slot_limits
 from orq.core.task import Task, parse_task
 from orq.git.manager import GitManager
@@ -790,7 +790,8 @@ class Runner:
     # agents
 
     async def _call(self, role: str, agent: Agent, prompt: str, log_path: Path, session_id: str | None, **options: object) -> AgentResult:
-        """Run an agent; wait out Claude usage limits; turn any other failure into an owner decision."""
+        """Run an agent; wait out Claude usage limits; retry transient failures; turn any other failure into an owner decision."""
+        transient_attempts = 0
         while True:
             result = await agent.run(prompt, cwd=self.worktree, log_path=log_path, session_id=session_id, run_dir=self.rundir.path, **options)
             self.rundir.event(role, ok=result.ok, error_kind=result.error_kind, session_id=result.session_id,
@@ -807,6 +808,13 @@ class Runner:
                 self.rundir.event("rate_limit", role=role, until=until.isoformat(), attempt=self.cp.rate_limit_retries, error=result.error)
                 await self._wait_rate_limit_if_needed()
                 self._transition(_PHASE_STATE[self.cp.phase], iteration=self.cp.iteration, after="rate_limit")
+                continue
+            if (result.error_kind == "error" and transient_error(result.error or "")
+                    and transient_attempts < self.config.limits.transient_retries):
+                transient_attempts += 1
+                self.rundir.event("transient_retry", role=role, attempt=transient_attempts, error=(result.error or "")[:300],
+                                  wait_seconds=self.config.limits.transient_wait_seconds)
+                await asyncio.sleep(self.config.limits.transient_wait_seconds)
                 continue
             kind = "rate limit" if result.error_kind == "rate_limit" else result.error_kind
             self._raise_decision("error", Decision(

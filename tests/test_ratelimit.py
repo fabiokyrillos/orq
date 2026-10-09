@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+
+import pytest
 from zoneinfo import ZoneInfo
 
 from orq.adapters.base import AgentResult
@@ -42,3 +44,20 @@ def test_reset_time_falls_back_to_text_then_default() -> None:
 def test_stale_stream_event_in_the_past_is_ignored() -> None:
     result = AgentResult(ok=False, error="rate limit", error_kind="rate_limit", rate_limit={"resetsAt": int(NOW.timestamp()) - 5})
     assert claude_reset_time(result, now=NOW) == NOW + timedelta(minutes=15)
+
+
+@pytest.mark.parametrize("text, transient", [
+    ("Reconnecting... 2/5 (unexpected status 503 Service Unavailable: ...)", True),
+    ("API Error: 529 Overloaded", True),
+    ("upstream connect error: 502 Bad Gateway", True),
+    ("The service is temporarily unavailable", True),
+    ("stream disconnected: connection reset by peer", True),
+    ("request timed out", True),
+    ("API Error: 400 invalid_request_error", False),
+    ("You've hit your session limit", False),
+    ("", False),
+])
+def test_transient_error(text: str, transient: bool) -> None:
+    from orq.core.ratelimit import transient_error
+
+    assert transient_error(text) is transient

@@ -15,6 +15,9 @@ class LimitsConfig:
     max_concurrent_runs: int = 2
     # Times a Claude usage limit is waited out within one iteration before the owner is asked.
     rate_limit_retries: int = 3
+    # Phase 7.2: a transient agent failure (5xx, overloaded, network) is retried this often per call, after this wait.
+    transient_retries: int = 2
+    transient_wait_seconds: float = 60
 
 
 @dataclass

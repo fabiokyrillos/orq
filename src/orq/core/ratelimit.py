@@ -12,6 +12,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from orq.adapters.base import AgentResult
 
+# Phase 7.2: failures that usually pass by themselves (server side or network), retried before the owner is asked.
+_TRANSIENT_RE = re.compile(
+    r"\b5\d\d\b|overloaded|service unavailable|temporarily unavailable|bad gateway|gateway time-?out|reconnecting"
+    r"|connection reset|connection closed|timed out",
+    re.IGNORECASE,
+)
 _RESET_RE = re.compile(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)", re.IGNORECASE)
 DEFAULT_BACKOFF = timedelta(minutes=15)
 
@@ -44,3 +50,8 @@ def claude_reset_time(result: AgentResult, *, now: datetime | None = None) -> da
             return candidate
     parsed = parse_claude_reset(result.error or result.text or "", now=now)
     return parsed if parsed else now + DEFAULT_BACKOFF
+
+
+def transient_error(text: str) -> bool:
+    """True for errors that usually pass by themselves: HTTP 5xx, overloaded, unavailable, network resets."""
+    return bool(text) and bool(_TRANSIENT_RE.search(text))

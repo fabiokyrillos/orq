@@ -562,11 +562,39 @@ def test_rate_limit_retries_exhausted_asks_owner(env, no_sleep) -> None:
 def test_agent_error_becomes_retry_decision(env) -> None:
     make, paths, _ = env
     asked: list[Decision] = []
-    implementer = FakeImplementer([AgentResult(ok=False, error="API Error: 529 Overloaded", error_kind="error"), ok()])
+    implementer = FakeImplementer([AgentResult(ok=False, error="API Error: 400 invalid_request", error_kind="error"), ok()])
     runner = make(implementer, FakeReviewer([review("done", None)]), human=lambda d: asked.append(d) or "retry")
 
     assert asyncio.run(runner.execute()) is RunState.DONE
-    assert asked[0].source == "orq" and "529" in asked[0].context and implementer.calls == 2
+    assert asked[0].source == "orq" and "400" in asked[0].context and implementer.calls == 2
+
+
+TRANSIENT = "Reconnecting... 2/5 (unexpected status 503 Service Unavailable: An error occurred while processing your request.)"
+
+
+def test_transient_agent_failures_are_retried_before_the_owner_is_asked(env, no_sleep) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    implementer = FakeImplementer([AgentResult(ok=False, error=TRANSIENT, error_kind="error"),
+                                   AgentResult(ok=False, error="API Error: 529 Overloaded", error_kind="error"), ok()])
+    runner = make(implementer, FakeReviewer([review("done", None)]), human=lambda d: asked.append(d) or "retry")
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert asked == [] and implementer.calls == 3
+    assert no_sleep.count(60) == 2
+    retries = [json.loads(l) for l in (paths.run_dir(runner.run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()
+               if json.loads(l)["type"] == "transient_retry"]
+    assert [(e["role"], e["attempt"]) for e in retries] == [("implementer", 1), ("implementer", 2)]
+
+
+def test_transient_failures_beyond_the_retries_ask_the_owner(env, no_sleep) -> None:
+    make, paths, _ = env
+    asked: list[Decision] = []
+    implementer = FakeImplementer([AgentResult(ok=False, error=TRANSIENT, error_kind="error")] * 3 + [ok()])
+    runner = make(implementer, FakeReviewer([review("done", None)]), human=lambda d: asked.append(d) or "retry")
+
+    assert asyncio.run(runner.execute()) is RunState.DONE
+    assert len(asked) == 1 and "503" in asked[0].context and implementer.calls == 4
 
 
 def test_agent_error_abort(env) -> None:
