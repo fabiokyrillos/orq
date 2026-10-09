@@ -77,3 +77,45 @@ Reply formats (also sent back as a hint when a message is not understood):
 * `DQMKR 2` picks option 2 of decision `DQMKR`; `DQMKR <text>` is a free-text answer.
 * `APPROVE DQMKR` or `DENY DQMKR` for destructive approvals; a number is refused for those.
 * `STATUS`, `STATUS <run>`, `PAUSE <run>`, `RESUME <run>`, `ABORT <run>`.
+
+## 7. Project conversations in a group (Phase 7.2)
+
+The group carries questions about a project; decisions and commands stay in the private chat. The workflow tells the two apart with a `channel` column, and orq never sees the group id.
+
+### 7.1 Data table
+
+Add a column `channel` (String) to `orq_messages`. Old rows stay empty, which orq reads as `owner`.
+
+### 7.2 Create the group
+
+On your phone, create a WhatsApp group with orq's number (the Evolution instance), for example "orq conversa". Send `oi` in it.
+
+### 7.3 Find the group id and how the group names you
+
+In n8n, open **Executions** of this workflow and the latest `Webhook Evolution inbound` run (the current workflow drops group messages, but the execution keeps its input). In `body.data.key`:
+
+* `remoteJid` is the group id, ending in `@g.us` (for example `120363012345678901@g.us`): that is `GROUP_JID`;
+* `participant` is you. If it is `<your number>@s.whatsapp.net`, `OWNER_IN_GROUP` is your number. If it ends in `@lid` (newer WhatsApp versions), `OWNER_IN_GROUP` is the part before `@`.
+
+No execution? Ask Evolution: `GET https://<evolution host>/group/fetchAllGroups/<instance>?getParticipants=false` with the `apikey` header lists the groups and their `id`.
+
+### 7.4 Update the workflow
+
+Re-import `docs/n8n/orq-workflow.json` as a new workflow and **deactivate the old one** (both use the same webhook paths). In the new one, set the credentials and replace the placeholders as in section 3, plus:
+
+1. `Evolution sendText`: `GROUP_JID` in the JSON body (a message with `channel: "chat"` goes to the group, any other to `OWNER_NUMBER`).
+2. `Only the owner in the group`: `GROUP_JID` and `OWNER_IN_GROUP`.
+3. `Insert inbound`, `Insert group message`, `Mark consumed`: open each once so they load the new `channel` column.
+
+Rather edit the live workflow by hand? The changes are:
+
+* `Evolution sendText`, JSON body: `number: $json.body.channel === 'chat' ? 'GROUP_JID' : 'OWNER_NUMBER'`;
+* `Respond replies`: add `channel: i.json.channel || 'owner'` to each message;
+* `Insert inbound`: `channel = owner`;
+* the false branch of `Only the owner` goes to a new IF that checks `remoteJid == GROUP_JID`, `participant` (before `@`) `== OWNER_IN_GROUP` and `fromMe == false`, then to an insert with `channel = chat`.
+
+Activate.
+
+### 7.5 Test
+
+In the group: `AJUDA` (the commands come back in the group), `PROJETO` (the list), `PROJETO <name>`, then a question. A message from someone else in the group must get no answer, and `STATUS` in the private chat must still work.

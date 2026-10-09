@@ -281,6 +281,17 @@ Blank lines separate the sections, the context keeps its line breaks, and the ca
 
 **Note:** Evolution API uses an unofficial WhatsApp Web session. Use a dedicated sender number, not the owner's personal one.
 
+Phase 7.2: project conversations in a WhatsApp group.
+
+* The group holds the owner and orq's Evolution number. n8n tags its messages `channel = "chat"`, and only when the owner wrote them (`key.participant`); orq's own messages are dropped. `POST /orq/notify` with `channel: "chat"` goes to the group, and without it to the owner as before. orq never sees the group id.
+* The hub hands `chat` messages to `ChatBridge`:
+  * `PROJETO <name>` picks the project and keeps it;
+  * `PROJETO` lists the projects;
+  * `NOVA` starts a new conversation;
+  * `AJUDA` explains the commands;
+  * anything else is a question for the chat agent (section 4), asked for phone formatting.
+* The answer is converted from Markdown and split into parts of up to 3,000 characters. Each project's WhatsApp conversation is a normal conversation (`via whatsapp`), visible and continuable on the dashboard. Decisions and commands stay in the private chat.
+
 ### 9.4 Desktop
 
 Windows toast on every new decision and on run completion or failure. Phase 4: `winotify` from the run process; a failed toast is an event (`toast_failed`), never an error. `[notify].toast = false` disables it.
@@ -414,6 +425,7 @@ Never inside the repo (repos are public):
   * An unrecognized error is never retried blindly; it pauses the run for the owner.
 * Codex limit → switch reviewer to the Claude fallback, record it, retry Codex after reset. Phase 2: `ReviewerRouter` wraps both adapters behind the `Agent` interface. The Codex adapter reads the `rate_limits` snapshot from the session file after every call; at or past `switch_at_used_percent` the router routes later reviews to the fallback until `primary.resets_at` (proactive). A Codex failure classified as a limit (snapshot `rate_limit_reached_type` set, or a message matching usage limit / rate limit / quota / 429) switches at once and the same review is retried on the fallback (reactive). Events `reviewer_switched` and `reviewer_restored`; the choice survives a resume through `state.json`.
 * Claude limit → `PAUSED_RATE_LIMIT`, backoff, notify owner. Phase 2: the wait is until the reset time (`resetsAt` from the stream event when it lies in the future, else the `resets <time> (<zone>)` text, else 15 minutes) plus 60 s, then the same phase is retried. After `[limits].rate_limit_retries` (default 3) waits inside one iteration the owner is asked (`retry`/`abort`). The owner may kill the process during the wait; `orq resume` honours the recorded reset time.
+* Phase 7.2: a failure of kind `error` whose text is transient (HTTP 5xx, overloaded, service or temporarily unavailable, bad gateway, reconnecting, connection reset or closed, timed out) is retried after `[limits].transient_wait_seconds`, at most `[limits].transient_retries` times per call, with a `transient_retry` event. Only then is the owner asked.
 * Any other agent failure (`error`, `auth`) is never retried blindly and no longer ends the run as `FAILED`: it raises a `blocked` decision with `retry` and `abort`. `FAILED` is reserved for invariants (invalid reviewer output after a retry, limits exceeded).
 * Keep reviewer prompts lean: the reviewer reads the repo; send only task, milestone, diff summary, check results, implementer final message.
 * Reviewer effort: low for routine iterations, high for planning and the final merge gate.
@@ -435,6 +447,8 @@ max_iterations = 15
 max_wall_hours = 6
 max_concurrent_runs = 2      # global; runs waiting for the owner do not count; Phase 7.1: also a dashboard setting (1 to 6)
 rate_limit_retries = 3
+transient_retries = 2        # Phase 7.2: a 5xx/overloaded/network failure is retried this often per call
+transient_wait_seconds = 60
 
 [implementer]
 default_model = "opus"
@@ -642,6 +656,13 @@ Status: complete on 2026-10-08 (see `docs/phase7-findings.md`): run `R59GV9` clo
 * The hub runs under `pythonw`: agent processes it starts (the chat) get `CREATE_NO_WINDOW` too; without a console, claude stopped after its first tool call.
 
 Status: complete on 2026-10-08 (see `docs/phase7-findings.md` section 9): every item checked on the owner's hub; run `R2NTVW` recreated a removed project's clone and merged.
+
+### Phase 7.2: project conversations on WhatsApp (owner's request after Phase 7.1)
+
+* Conversations about a project from a dedicated WhatsApp group (9.3).
+* Transient agent failures retried before the owner is asked (12).
+
+Status: see `docs/phase7-findings.md` section 10.
 
 ## 16. Non goals
 

@@ -13,8 +13,16 @@
       "name": "Webhook notify",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [0, 0],
-      "credentials": { "httpHeaderAuth": { "id": "REPLACE", "name": "orq bearer" } }
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE",
+          "name": "orq bearer"
+        }
+      }
     },
     {
       "parameters": {
@@ -24,25 +32,39 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ number: \"OWNER_NUMBER\", text: $json.body.text }) }}",
+        "jsonBody": "={{ JSON.stringify({ number: $json.body.channel === 'chat' ? 'GROUP_JID' : 'OWNER_NUMBER', text: $json.body.text }) }}",
         "options": {}
       },
       "id": "a2",
       "name": "Evolution sendText",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [260, 0],
-      "credentials": { "httpHeaderAuth": { "id": "REPLACE", "name": "evolution apikey" } }
+      "position": [
+        260,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE",
+          "name": "evolution apikey"
+        }
+      }
     },
     {
-      "parameters": { "respondWith": "json", "responseBody": "={{ { ok: true } }}", "options": {} },
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true } }}",
+        "options": {}
+      },
       "id": "a3",
       "name": "Respond notify",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [520, 0]
+      "position": [
+        520,
+        0
+      ]
     },
-
     {
       "parameters": {
         "httpMethod": "GET",
@@ -55,19 +77,38 @@
       "name": "Webhook replies",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [0, 220],
-      "credentials": { "httpHeaderAuth": { "id": "REPLACE", "name": "orq bearer" } }
+      "position": [
+        0,
+        220
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE",
+          "name": "orq bearer"
+        }
+      }
     },
     {
       "parameters": {
         "resource": "row",
         "operation": "get",
-        "dataTableId": { "__rl": true, "mode": "name", "value": "orq_messages" },
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "orq_messages"
+        },
         "matchType": "allConditions",
         "filters": {
           "conditions": [
-            { "keyName": "consumed", "condition": "isFalse" },
-            { "keyName": "id", "condition": "gt", "keyValue": "={{ Number($json.query.since || 0) }}" }
+            {
+              "keyName": "consumed",
+              "condition": "isFalse"
+            },
+            {
+              "keyName": "id",
+              "condition": "gt",
+              "keyValue": "={{ Number($json.query.since || 0) }}"
+            }
           ]
         },
         "returnAll": false,
@@ -80,22 +121,27 @@
       "name": "Unconsumed rows",
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
-      "position": [260, 220],
+      "position": [
+        260,
+        220
+      ],
       "alwaysOutputData": true
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { messages: $input.all().filter(i => i.json.id !== undefined).map(i => ({ id: i.json.id, text: i.json.text, received_at: i.json.createdAt })) } }}",
+        "responseBody": "={{ { messages: $input.all().filter(i => i.json.id !== undefined).map(i => ({ id: i.json.id, text: i.json.text, received_at: i.json.createdAt, channel: i.json.channel || 'owner' })) } }}",
         "options": {}
       },
       "id": "b3",
       "name": "Respond replies",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [520, 220]
+      "position": [
+        520,
+        220
+      ]
     },
-
     {
       "parameters": {
         "httpMethod": "POST",
@@ -108,8 +154,16 @@
       "name": "Webhook ack",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [0, 440],
-      "credentials": { "httpHeaderAuth": { "id": "REPLACE", "name": "orq bearer" } }
+      "position": [
+        0,
+        440
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE",
+          "name": "orq bearer"
+        }
+      }
     },
     {
       "parameters": {
@@ -119,22 +173,72 @@
       "name": "One item per id",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [260, 440]
+      "position": [
+        260,
+        440
+      ]
     },
     {
       "parameters": {
         "resource": "row",
         "operation": "update",
-        "dataTableId": { "__rl": true, "mode": "name", "value": "orq_messages" },
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "orq_messages"
+        },
         "matchType": "allConditions",
-        "filters": { "conditions": [ { "keyName": "id", "condition": "eq", "keyValue": "={{ $json.id }}" } ] },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            }
+          ]
+        },
         "columns": {
           "mappingMode": "defineBelow",
-          "value": { "consumed": true },
+          "value": {
+            "consumed": true
+          },
           "schema": [
-            { "id": "text", "displayName": "text", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
-            { "id": "from_number", "displayName": "from_number", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
-            { "id": "consumed", "displayName": "consumed", "required": false, "defaultMatch": false, "display": true, "type": "boolean", "canBeUsedToMatch": true }
+            {
+              "id": "text",
+              "displayName": "text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "from_number",
+              "displayName": "from_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "consumed",
+              "displayName": "consumed",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
           ]
         }
       },
@@ -142,18 +246,27 @@
       "name": "Mark consumed",
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
-      "position": [520, 440],
+      "position": [
+        520,
+        440
+      ],
       "alwaysOutputData": true
     },
     {
-      "parameters": { "respondWith": "json", "responseBody": "={{ { ok: true } }}", "options": {} },
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true } }}",
+        "options": {}
+      },
       "id": "c4",
       "name": "Respond ack",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [780, 440]
+      "position": [
+        780,
+        440
+      ]
     },
-
     {
       "parameters": {
         "httpMethod": "POST",
@@ -164,24 +277,37 @@
       "name": "Webhook Evolution inbound",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [0, 660]
+      "position": [
+        0,
+        660
+      ]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
           "conditions": [
             {
               "id": "owner",
               "leftValue": "={{ ($json.body.data?.key?.remoteJid || '').split('@')[0] }}",
               "rightValue": "OWNER_NUMBER",
-              "operator": { "type": "string", "operation": "equals" }
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
             },
             {
               "id": "not-from-me",
               "leftValue": "={{ $json.body.data?.key?.fromMe === true }}",
               "rightValue": false,
-              "operator": { "type": "boolean", "operation": "equals" }
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
             }
           ],
           "combinator": "and"
@@ -192,24 +318,65 @@
       "name": "Only the owner",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [260, 660]
+      "position": [
+        260,
+        660
+      ]
     },
     {
       "parameters": {
         "resource": "row",
         "operation": "insert",
-        "dataTableId": { "__rl": true, "mode": "name", "value": "orq_messages" },
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "orq_messages"
+        },
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
             "text": "={{ $json.body.data?.message?.conversation || $json.body.data?.message?.extendedTextMessage?.text || '' }}",
             "from_number": "={{ ($json.body.data?.key?.remoteJid || '').split('@')[0] }}",
-            "consumed": false
+            "consumed": false,
+            "channel": "owner"
           },
           "schema": [
-            { "id": "text", "displayName": "text", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
-            { "id": "from_number", "displayName": "from_number", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
-            { "id": "consumed", "displayName": "consumed", "required": false, "defaultMatch": false, "display": true, "type": "boolean", "canBeUsedToMatch": true }
+            {
+              "id": "text",
+              "displayName": "text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "from_number",
+              "displayName": "from_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "consumed",
+              "displayName": "consumed",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
           ]
         }
       },
@@ -217,20 +384,250 @@
       "name": "Insert inbound",
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
-      "position": [520, 640]
+      "position": [
+        520,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "group",
+              "leftValue": "={{ $json.body.data?.key?.remoteJid || '' }}",
+              "rightValue": "GROUP_JID",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "owner-in-group",
+              "leftValue": "={{ ($json.body.data?.key?.participant || '').split('@')[0] }}",
+              "rightValue": "OWNER_IN_GROUP",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "not-from-me",
+              "leftValue": "={{ $json.body.data?.key?.fromMe === true }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Only the owner in the group",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        520,
+        860
+      ],
+      "id": "a14"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "orq_messages"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "text": "={{ $json.body.data?.message?.conversation || $json.body.data?.message?.extendedTextMessage?.text || '' }}",
+            "from_number": "={{ ($json.body.data?.key?.participant || '').split('@')[0] }}",
+            "consumed": false,
+            "channel": "chat"
+          },
+          "schema": [
+            {
+              "id": "text",
+              "displayName": "text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "from_number",
+              "displayName": "from_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "consumed",
+              "displayName": "consumed",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "channel",
+              "displayName": "channel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        }
+      },
+      "id": "a15",
+      "name": "Insert group message",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        780,
+        840
+      ]
     }
   ],
   "connections": {
-    "Webhook notify": { "main": [ [ { "node": "Evolution sendText", "type": "main", "index": 0 } ] ] },
-    "Evolution sendText": { "main": [ [ { "node": "Respond notify", "type": "main", "index": 0 } ] ] },
-    "Webhook replies": { "main": [ [ { "node": "Unconsumed rows", "type": "main", "index": 0 } ] ] },
-    "Unconsumed rows": { "main": [ [ { "node": "Respond replies", "type": "main", "index": 0 } ] ] },
-    "Webhook ack": { "main": [ [ { "node": "One item per id", "type": "main", "index": 0 } ] ] },
-    "One item per id": { "main": [ [ { "node": "Mark consumed", "type": "main", "index": 0 } ] ] },
-    "Mark consumed": { "main": [ [ { "node": "Respond ack", "type": "main", "index": 0 } ] ] },
-    "Webhook Evolution inbound": { "main": [ [ { "node": "Only the owner", "type": "main", "index": 0 } ] ] },
-    "Only the owner": { "main": [ [ { "node": "Insert inbound", "type": "main", "index": 0 } ], [] ] }
+    "Webhook notify": {
+      "main": [
+        [
+          {
+            "node": "Evolution sendText",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evolution sendText": {
+      "main": [
+        [
+          {
+            "node": "Respond notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook replies": {
+      "main": [
+        [
+          {
+            "node": "Unconsumed rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unconsumed rows": {
+      "main": [
+        [
+          {
+            "node": "Respond replies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook ack": {
+      "main": [
+        [
+          {
+            "node": "One item per id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per id": {
+      "main": [
+        [
+          {
+            "node": "Mark consumed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark consumed": {
+      "main": [
+        [
+          {
+            "node": "Respond ack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Evolution inbound": {
+      "main": [
+        [
+          {
+            "node": "Only the owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only the owner": {
+      "main": [
+        [
+          {
+            "node": "Insert inbound",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Only the owner in the group",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only the owner in the group": {
+      "main": [
+        [
+          {
+            "node": "Insert group message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
   },
-  "settings": { "executionOrder": "v1" },
+  "settings": {
+    "executionOrder": "v1"
+  },
   "active": false
 }
