@@ -597,7 +597,7 @@ async function usagePage() {
 function chatMessage(m) {
   const who = { user: 'você', assistant: 'Claude', error: 'erro' }[m.role] || m.role;
   const meta = m.role === 'assistant' && m.usage ? ` · ${esc(m.model || '')} · ${num((m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0) + (m.usage.cache_creation_input_tokens || 0))} / ${num(m.usage.output_tokens)} tokens` : '';
-  return `<div class="msgbox ${m.role}"><div class="who">${who} <span class="muted small">${new Date(m.ts).toLocaleTimeString('pt-BR')}${meta}</span></div><div class="text">${esc(m.text)}</div></div>`;
+  return `<div class="msgbox ${m.role}"><div class="who">${who}${m.via === 'whatsapp' ? ' <span class="chip">WhatsApp</span>' : ''} <span class="muted small">${new Date(m.ts).toLocaleTimeString('pt-BR')}${meta}</span></div><div class="text">${esc(m.text)}</div></div>`;
 }
 
 async function chatTab(el, p, chatId) {
@@ -607,7 +607,7 @@ async function chatTab(el, p, chatId) {
       <div class="card chat-list" style="padding:0">
         <a href="${projectPath(p.repo)}/chat" class="${current ? '' : 'active'}"><b>+ Nova conversa</b></a>
         ${chats.map(c => `<a href="${projectPath(p.repo)}/chat/${c.chat_id}" class="${current && current.chat_id === c.chat_id ? 'active' : ''}">${esc(c.title)}
-          <div class="muted small">${ago(c.updated_at)} · ${esc(c.model)}</div></a>`).join('')}
+          <div class="muted small">${ago(c.updated_at)} · ${esc(c.model)}${c.via === 'whatsapp' ? ' · WhatsApp' : ''}</div></a>`).join('')}
       </div>
       <div class="card chat-main">
         <div class="hint">O Claude lê o código deste projeto (a versão mais recente de ${esc(p.base_branch)} no GitHub) e responde. Ele só lê: não altera arquivos nem inicia runs. Cada mensagem gasta da cota do Claude e aparece em Uso.</div>

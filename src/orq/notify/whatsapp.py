@@ -16,6 +16,7 @@ class InboundMessage:
     id: int
     text: str
     received_at: str | None = None
+    channel: str = "owner"  # Phase 7.2: "chat" for the project-conversation group; n8n decides, orq never sees ids
 
 
 class WhatsAppClient:
@@ -34,8 +35,9 @@ class WhatsAppClient:
         return cls(base, token, http=http)
 
 
-    def send(self, text: str) -> None:
-        response = self._http.post(f"{self.base_url}/orq/notify", json={"text": text}, headers=self._headers)
+    def send(self, text: str, channel: str | None = None) -> None:
+        body = {"text": text, **({"channel": channel} if channel else {})}  # no channel: the owner's private chat
+        response = self._http.post(f"{self.base_url}/orq/notify", json=body, headers=self._headers)
         response.raise_for_status()
 
     def replies(self, since: int) -> list[InboundMessage]:
@@ -47,7 +49,8 @@ class WhatsAppClient:
         for item in items or []:
             if not isinstance(item, dict) or "id" not in item:
                 continue
-            out.append(InboundMessage(id=int(item["id"]), text=str(item.get("text", "")), received_at=item.get("received_at")))
+            out.append(InboundMessage(id=int(item["id"]), text=str(item.get("text", "")), received_at=item.get("received_at"),
+                                      channel=str(item.get("channel") or "owner")))
         return sorted(out, key=lambda m: m.id)
 
     def ack(self, ids: list[int]) -> None:

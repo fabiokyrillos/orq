@@ -150,11 +150,12 @@ class ClaudeChat:
         self._prefix = argv_prefix
 
     async def run(self, prompt: str, *, cwd: Path, log_path: Path, session_id: str | None = None, model: str | None = None,
-                  **_: object) -> AgentResult:
+                  system_prompt: str | None = None, **_: object) -> AgentResult:
         sid = session_id or str(uuid.uuid4())
         session_flag = ["--resume", sid] if session_id else ["--session-id", sid]
+        # The appended system prompt is not stored in the session, so each call may use another one (Phase 7.2: WhatsApp).
         argv = [*(self._prefix or claude_argv()), "-p", "--output-format", "stream-json", "--verbose", *ISOLATION_FLAGS,
-                "--model", model or self.model, "--tools", "Read,Grep,Glob", "--append-system-prompt", CHAT_SYSTEM_PROMPT,
-                *session_flag]
+                "--model", model or self.model, "--tools", "Read,Grep,Glob",
+                "--append-system-prompt", system_prompt or CHAT_SYSTEM_PROMPT, *session_flag]
         completed = await stream_process(argv, cwd=cwd, stdin_text=prompt, log_path=log_path, env=clean_env())
         return _result_from(completed, sid)

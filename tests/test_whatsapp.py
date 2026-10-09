@@ -85,3 +85,14 @@ def test_read_secret_prefers_process_environment(monkeypatch: pytest.MonkeyPatch
     assert read_secret("ORQ_TEST_SECRET") == "abc"
     monkeypatch.delenv("ORQ_TEST_SECRET", raising=False)
     assert read_secret("ORQ_TEST_SECRET_MISSING_FOR_SURE") == ""
+
+
+def test_channel_goes_out_only_when_given_and_comes_back_on_replies(n8n: FakeN8n) -> None:
+    c = client(n8n)
+    c.send("para você")
+    c.send("para o grupo", channel="chat")
+    bodies = [json.loads(r.content) for r in n8n.requests]
+    assert bodies == [{"text": "para você"}, {"text": "para o grupo", "channel": "chat"}]  # old workflows ignore the field
+
+    n8n.inbox = [{"id": 1, "text": "STATUS"}, {"id": 2, "text": "oi", "channel": "chat"}, {"id": 3, "text": "x", "channel": ""}]
+    assert [m.channel for m in c.replies(since=0)] == ["owner", "chat", "owner"]

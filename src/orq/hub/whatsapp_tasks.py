@@ -36,8 +36,9 @@ WORKING = {RunState.PLANNING, RunState.IMPLEMENTING, RunState.VERIFYING, RunStat
 class WhatsAppTasks:
     def __init__(self, store: Store, paths: OrqPaths, config: Config, client: WhatsAppClient, *,
                  clock: Callable[[], float] = time.time, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-                 spawn: Callable[[OrqPaths, str], int] = spawn_resume) -> None:
+                 spawn: Callable[[OrqPaths, str], int] = spawn_resume, chat=None) -> None:
         self.store, self.paths, self.config, self.client = store, paths, config, client
+        self.chat = chat  # Phase 7.2: the group's project conversations (hub/whatsapp_chat.ChatBridge)
         self._clock, self._sleep, self._spawn = clock, sleep, spawn
         self._baseline()
 
@@ -177,6 +178,10 @@ class WhatsAppTasks:
         if not messages:
             return 0
         for message in messages:
+            if message.channel == "chat":
+                if self.chat is not None:
+                    self.chat.submit(message.text)  # answered by the bridge's own loop: a question takes minutes
+                continue
             reply = self.handle(message.text)
             if reply:
                 self.client.send(reply)

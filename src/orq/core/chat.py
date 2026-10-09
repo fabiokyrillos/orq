@@ -14,12 +14,17 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from orq.adapters.claude import CHAT_SYSTEM_PROMPT
 from orq.config import Config
 from orq.git.manager import GitError, GitManager
 from orq.paths import OrqPaths
 from orq.store.db import Store
 
 DEFAULT_MODEL = "opus"
+# Phase 7.2: the same conversation can continue on WhatsApp, where the answer is read on a phone.
+WHATSAPP_STYLE = (" This message came from WhatsApp and the answer is read on a phone: no tables and no Markdown headings, "
+                  "use *single asterisks* for bold, short paragraphs and short lists, and stay under 1500 characters "
+                  "unless the owner asks for detail.")
 _locks: dict[str, asyncio.Lock] = {}
 
 
@@ -90,7 +95,8 @@ def _prepare(paths: OrqPaths, config: Config, store: Store, git: GitManager, rep
 
 
 async def ask(paths: OrqPaths, config: Config, store: Store, git: GitManager, agent, repo: str, message: str, *,
-              chat_id: str | None = None, model: str | None = None, clone_url: str | None = None) -> dict:
+              chat_id: str | None = None, model: str | None = None, clone_url: str | None = None,
+              style: str | None = None, via: str | None = None) -> dict:
     """Send one message and wait for the answer: {chat_id, answer}. A failed answer raises ChatError and is kept."""
     text = message.strip()
     if not text:
@@ -102,7 +108,7 @@ async def ask(paths: OrqPaths, config: Config, store: Store, git: GitManager, ag
         folder = _chat_dir(paths, repo, chat_id)
         folder.mkdir(parents=True)
         _write_meta(folder, {"chat_id": chat_id, "project": repo, "title": text.splitlines()[0][:80], "session_id": None,
-                             "model": model or DEFAULT_MODEL, "created_at": _now(), "updated_at": _now()})
+                             "model": model or DEFAULT_MODEL, "via": via or "dashboard", "created_at": _now(), "updated_at": _now()})
     folder = _chat_dir(paths, repo, chat_id)
     if not (folder / "meta.json").exists():
         raise ChatError(f"no chat {chat_id}")
@@ -112,22 +118,24 @@ async def ask(paths: OrqPaths, config: Config, store: Store, git: GitManager, ag
     async with lock:
         meta = _read_meta(folder)
         use_model = model or meta.get("model") or DEFAULT_MODEL
-        _append(folder, {"role": "user", "text": text, "ts": _now()})
+        tag = {"via": via} if via else {}
+        _append(folder, {"role": "user", "text": text, "ts": _now(), **tag})
         try:
             worktree = await asyncio.to_thread(_prepare, paths, config, store, git, repo, clone_url)
         except GitError as exc:
             _append(folder, {"role": "error", "text": f"could not update the checkout: {exc}", "ts": _now()})
             raise ChatError(str(exc)) from exc
+        system_prompt = CHAT_SYSTEM_PROMPT + (WHATSAPP_STYLE if style == "whatsapp" else "")
         result = await agent.run(text, cwd=worktree, log_path=folder / "claude.stream.jsonl", session_id=meta.get("session_id"),
-                                 model=use_model)
+                                 model=use_model, system_prompt=system_prompt)
         if not result.ok:
             error = (result.error or "").strip()
             if not error or error.startswith("{"):  # the tail of the stream, not a message: the CLI just stopped
                 error = "claude stopped without an answer (see claude.stream.jsonl in the conversation's folder)"
-            _append(folder, {"role": "error", "text": error, "kind": result.error_kind, "ts": _now()})
+            _append(folder, {"role": "error", "text": error, "kind": result.error_kind, "ts": _now(), **tag})
             raise ChatError(error)
         _append(folder, {"role": "assistant", "text": result.text, "ts": _now(), "model": use_model, "usage": result.usage,
-                         "rate_limit": result.rate_limit})
+                         "rate_limit": result.rate_limit, **tag})
         _write_meta(folder, {**meta, "session_id": result.session_id or meta.get("session_id"), "model": use_model,
                              "updated_at": _now()})
     return {"chat_id": chat_id, "answer": result.text}

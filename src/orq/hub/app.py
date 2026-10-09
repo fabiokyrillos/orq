@@ -42,6 +42,7 @@ from orq.adapters.probe import probe_model
 from orq.git.manager import GitManager
 from orq.hub.auto_answer import AutoAnswerer
 from orq.hub.dispatcher import Dispatcher
+from orq.hub.whatsapp_chat import ChatBridge
 from orq.hub.whatsapp_tasks import WhatsAppTasks
 from orq.notify.whatsapp import WhatsAppClient
 from orq.paths import OrqPaths
@@ -131,7 +132,8 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
     store = Store(paths.db)
     git = git or GitManager()
     chat_agent = chat_agent or ClaudeChat()
-    tasks = WhatsAppTasks(store, paths, config, whatsapp) if whatsapp is not None else None
+    bridge = ChatBridge(store, paths, config, whatsapp, git, chat_agent, clone_url=chat_clone_url) if whatsapp is not None else None
+    tasks = WhatsAppTasks(store, paths, config, whatsapp, chat=bridge) if whatsapp is not None else None
     dispatcher = Dispatcher(store, paths, config)
     port = config.dashboard.port
     hosts = allowed_hosts or {f"127.0.0.1:{port}", f"localhost:{port}"}
@@ -147,6 +149,8 @@ def create_app(paths: OrqPaths, config: Config, *, whatsapp: WhatsAppClient | No
             handles.append(asyncio.create_task(AutoAnswerer(store, paths, config).loop()))
         if tasks is not None and start_tasks:
             handles += [asyncio.create_task(tasks.outbound_loop()), asyncio.create_task(tasks.inbound_loop())]
+            if bridge is not None:
+                handles.append(asyncio.create_task(bridge.loop()))
         try:
             yield
         finally:
